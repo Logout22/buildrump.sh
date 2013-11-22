@@ -1,0 +1,15 @@
+define nstep
+set $foo = $arg0
+while ($foo--)
+step
+end
+end
+#set logging on
+#set logging file trace.log
+break main
+run
+break if_address
+c
+nstep 1000
+c
+q
