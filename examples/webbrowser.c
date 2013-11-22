@@ -75,7 +75,7 @@ main()
 #if 0
 	sin.sin_len = sizeof(sin);
 #endif
-	sin.sin_port = htons(8080);
+	sin.sin_port = htons(80);
 	memcpy(&sin.sin_addr, hp->h_addr, sizeof(sin.sin_addr));
 
 	if (rump_sys_connect(s, (struct sockaddr *)&sin, sizeof(sin)) == -1)
