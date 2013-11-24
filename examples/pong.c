@@ -1,5 +1,7 @@
 #include <sys/types.h>
 #include <sys/cdefs.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <signal.h>
 
 #include <assert.h>
@@ -22,6 +24,8 @@
 #include <rump/rump_syscalls.h>
 #include <rump/rumpnet_if_pub.h>
 
+char tmpbus_name[] = "busXXXXXX\0";
+
 static void __attribute__((__noreturn__))
 die(int e, const char *msg)
 {
@@ -34,6 +38,7 @@ die(int e, const char *msg)
 
 void __attribute__((__noreturn__))
 cleanup(int signum) {
+	unlink(tmpbus_name);
 	die(signum, NULL);
 }
 
@@ -49,9 +54,12 @@ int main(int argc, char *argv[]) {
 		.sa_handler = cleanup
 	};
 	sigaction(SIGINT, &sigact, NULL);
+	sigaction(SIGTERM, &sigact, NULL);
 
 	err("Creating Bus\n");
-    rump_pub_shmif_create("etherbus", 0);
+	assert(*mktemp(tmpbus_name) != 0);
+	creat(tmpbus_name, 0600);
+    rump_pub_shmif_create(tmpbus_name, 0);
 
 	char const *ip_address = "10.165.8.1";
 	err("Setting IP address %s\n", ip_address);
@@ -99,7 +107,7 @@ int main(int argc, char *argv[]) {
 		}
 		err("rcvd %s\n", rbuf);
 		sleep(1);
-        char const wbuf[] = "Pong.";
+        char const wbuf[] = "Pong.\0";
         res = rump_sys_write(rcvsock, wbuf, sizeof(wbuf));
         if (res <= 0) {
             die(errno, "write");

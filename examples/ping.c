@@ -48,6 +48,7 @@ int main(int argc, char *argv[]) {
 		.sa_handler = cleanup
 	};
 	sigaction(SIGINT, &sigact, NULL);
+	sigaction(SIGTERM, &sigact, NULL);
 
 	err("Creating Bus\n");
     rump_pub_shmif_create("etherbus", 0);
@@ -77,7 +78,7 @@ int main(int argc, char *argv[]) {
     }
 
     for(;;) {
-        char const wbuf[] = "Ping.";
+        char const wbuf[] = "Ping.\0";
         res = rump_sys_write(tcpsock, wbuf, sizeof(wbuf));
         if (res <= 0) {
             die(errno, "write");
