@@ -1,5 +1,6 @@
 #include <sys/types.h>
 #include <sys/cdefs.h>
+#include <signal.h>
 
 #include <assert.h>
 #include <err.h>
@@ -37,7 +38,7 @@ cleanup(int signum) {
 }
 
 #define err(...) { \
-	fprintf(stderr, "clt: "); \
+	fprintf(stderr, "srv: "); \
 	fprintf(stderr, __VA_ARGS__); \
 }
 
@@ -52,10 +53,10 @@ int main(int argc, char *argv[]) {
 	err("Creating Bus\n");
     rump_pub_shmif_create("etherbus", 0);
 
-	char const *ip_address = "10.165.8.2";
+	char const *ip_address = "10.165.8.1";
 	err("Setting IP address %s\n", ip_address);
     rump_pub_netconfig_ipv4_ifaddr("shmif0", ip_address, "255.255.255.0");
-    rump_pub_netconfig_ifup("shmif0");
+	rump_pub_netconfig_ifup("shmif0");
 
 	err("Creating Socket\n");
     int tcpsock = rump_sys_socket(PF_INET, SOCK_STREAM, 0);
@@ -63,36 +64,52 @@ int main(int argc, char *argv[]) {
         die(errno, "socket");
     }
 
-	char const *srv_address = "10.165.8.1";
 	short const portnum = 26417;
-	err("Connecting to %s:%d\n", srv_address, portnum);
+	err("Binding to port %d\n", portnum);
     struct sockaddr_in sin = {
         .sin_family = AF_INET,
         .sin_port = htons(portnum),
     };
-    inet_aton(srv_address, &sin.sin_addr);
-    int res = rump_sys_connect(tcpsock, (struct sockaddr*) &sin, sizeof(sin));
+	// listen from all addresses
+    memset(&sin.sin_addr, 0, sizeof(sin.sin_addr));
+    int res = rump_sys_bind(tcpsock, (struct sockaddr*) &sin, sizeof(sin));
     if (res != 0) {
-        die(errno, "connect");
+        die(errno, "bind");
     }
 
-    for(;;) {
-        char const wbuf[] = "Ping.";
-        res = rump_sys_write(tcpsock, wbuf, sizeof(wbuf));
+	err("Listening (Queue length 120)\n");
+    res = rump_sys_listen(tcpsock, 120);
+    if (res != 0) {
+        die(errno, "listen");
+    }
+
+	err("Accepting...\n");
+    int rcvsock = rump_sys_accept(tcpsock, NULL, 0);
+    if (rcvsock <= 0) {
+        die(errno, "accept");
+    }
+
+	int const bufsize = 50;
+	//err("Reading at most %d bytes\n", bufsize);
+	for(;;) {
+		char rbuf[bufsize];
+		res = rump_sys_read(rcvsock, rbuf, sizeof(rbuf));
+		if (res <= 0) {
+			die(errno, "read");
+		}
+		err("rcvd %s\n", rbuf);
+		sleep(1);
+        char const wbuf[] = "Pong.";
+        res = rump_sys_write(rcvsock, wbuf, sizeof(wbuf));
         if (res <= 0) {
             die(errno, "write");
         }
-        int const bufsize = 50;
-        char rbuf[bufsize];
-        res = rump_sys_read(tcpsock, rbuf, sizeof(rbuf));
-        if (res <= 0) {
-            die(errno, "read");
-        }
-        err("rcvd %s\n", rbuf);
-		sleep(1);
-    }
+	}
+    rump_sys_close(rcvsock);
 
+	err("Closing\n");
     rump_sys_close(tcpsock);
 
 	die(0, NULL);
 }
+

@@ -8,8 +8,8 @@ end
 #set logging file trace.log
 break main
 run
-break if_address
+break ping.c:53
 c
-nstep 1000
+nstep 10000
 c
 q
