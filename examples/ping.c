@@ -1,5 +1,6 @@
 #include <sys/types.h>
 #include <sys/cdefs.h>
+#include <sys/stat.h>
 
 #include <assert.h>
 #include <err.h>
@@ -13,6 +14,7 @@
 #include <stropts.h>
 
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
@@ -20,6 +22,8 @@
 #include <rump/netconfig.h>
 #include <rump/rump_syscalls.h>
 #include <rump/rumpnet_if_pub.h>
+
+#include "common.h"
 
 static void __attribute__((__noreturn__))
 die(int e, const char *msg)
@@ -50,8 +54,36 @@ int main(int argc, char *argv[]) {
 	sigaction(SIGINT, &sigact, NULL);
 	sigaction(SIGTERM, &sigact, NULL);
 
+    err("Fetching bus name\n");
+    int unix_socket = socket(AF_UNIX, SOCK_STREAM, 0);
+    assert(unix_socket);
+
+    struct sockaddr_un sockaddr = {
+        .sun_family = AF_UNIX,
+        .sun_path = SOCK_FN,
+    };
+    if (connect(unix_socket,
+                (struct sockaddr *)&sockaddr,
+                sizeof(sockaddr))) {
+        die(errno, "connect");
+    }
+
+    int const bufsize = 50;
+    char rbuf[bufsize + 1];
+    rbuf[bufsize] = 0;
+    if (read(unix_socket, rbuf, bufsize) <= 0) {
+        die(errno, "read");
+    }
+    close(unix_socket);
+
+    // bus file must be local and stat()-able
+    struct stat statstruct = {};
+    if (stat(rbuf, &statstruct) != 0) {
+        die(errno, "stat");
+    }
+
 	err("Creating Bus\n");
-    rump_pub_shmif_create("etherbus", 0);
+    rump_pub_shmif_create(rbuf, 0);
 
 	char const *ip_address = "10.165.8.2";
 	err("Setting IP address %s\n", ip_address);
@@ -83,9 +115,7 @@ int main(int argc, char *argv[]) {
         if (res <= 0) {
             die(errno, "write");
         }
-        int const bufsize = 50;
-        char rbuf[bufsize];
-        res = rump_sys_read(tcpsock, rbuf, sizeof(rbuf));
+        res = rump_sys_read(tcpsock, rbuf, bufsize);
         if (res <= 0) {
             die(errno, "read");
         }

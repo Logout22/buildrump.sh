@@ -16,6 +16,7 @@
 #include <stropts.h>
 
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
@@ -24,13 +25,15 @@
 #include <rump/rump_syscalls.h>
 #include <rump/rumpnet_if_pub.h>
 
+#include "common.h"
+
+int unix_socket;
 char tmpbus_name[] = "busXXXXXX\0";
 int tmpbus_hdl = -1;
 
 static void __attribute__((__noreturn__))
 die(int e, const char *msg)
 {
-
 	if (msg)
 		warnx("%s: %d", msg, e);
 	rump_sys_reboot(0, NULL);
@@ -41,6 +44,8 @@ void __attribute__((__noreturn__))
 cleanup(int signum) {
 	close(tmpbus_hdl);
 	unlink(tmpbus_name);
+    close(unix_socket);
+    unlink(SOCK_FN);
 	die(signum, NULL);
 }
 
@@ -57,6 +62,26 @@ int main(int argc, char *argv[]) {
 	};
 	sigaction(SIGINT, &sigact, NULL);
 	sigaction(SIGTERM, &sigact, NULL);
+
+    err("Creating UNIX socket\n");
+    unix_socket = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (unix_socket <= 0) {
+        die(errno, "socket");
+    }
+    struct sockaddr_un sockaddr = {
+        .sun_family = AF_UNIX,
+        .sun_path = SOCK_FN,
+    };
+
+    if (bind(unix_socket,
+                (struct sockaddr *)&sockaddr,
+                sizeof(sockaddr))) {
+        perror("bind");
+        return errno;
+    }
+    // 128 used to be hard-coded into the linux kernel
+    // and is still the default upper limit for the backlog
+    assert(listen(unix_socket, 128) == 0);
 
 	err("Creating Bus\n");
 	assert(*mktemp(tmpbus_name) != 0);
@@ -93,6 +118,14 @@ int main(int argc, char *argv[]) {
         die(errno, "listen");
     }
 
+    err("Waiting for a client to send the bus file name to\n");
+    int sndfnamesock = accept(unix_socket, NULL, 0);
+    if (sndfnamesock <= 0) {
+        die(errno, "accept");
+    }
+    write(sndfnamesock, tmpbus_name, sizeof(tmpbus_name));
+    close(sndfnamesock);
+
 	err("Accepting...\n");
     int rcvsock = rump_sys_accept(tcpsock, NULL, 0);
     if (rcvsock <= 0) {
@@ -100,10 +133,11 @@ int main(int argc, char *argv[]) {
     }
 
 	int const bufsize = 50;
+    char rbuf[bufsize + 1];
+    rbuf[bufsize] = 0;
 	//err("Reading at most %d bytes\n", bufsize);
 	for(;;) {
-		char rbuf[bufsize];
-		res = rump_sys_read(rcvsock, rbuf, sizeof(rbuf));
+		res = rump_sys_read(rcvsock, rbuf, bufsize);
 		if (res <= 0) {
 			die(errno, "read");
 		}
