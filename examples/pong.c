@@ -25,6 +25,7 @@
 #include <rump/rumpnet_if_pub.h>
 
 char tmpbus_name[] = "busXXXXXX\0";
+int tmpbus_hdl = -1;
 
 static void __attribute__((__noreturn__))
 die(int e, const char *msg)
@@ -38,6 +39,7 @@ die(int e, const char *msg)
 
 void __attribute__((__noreturn__))
 cleanup(int signum) {
+	close(tmpbus_hdl);
 	unlink(tmpbus_name);
 	die(signum, NULL);
 }
@@ -58,7 +60,7 @@ int main(int argc, char *argv[]) {
 
 	err("Creating Bus\n");
 	assert(*mktemp(tmpbus_name) != 0);
-	creat(tmpbus_name, 0600);
+	tmpbus_hdl = creat(tmpbus_name, 0600);
     rump_pub_shmif_create(tmpbus_name, 0);
 
 	char const *ip_address = "10.165.8.1";
