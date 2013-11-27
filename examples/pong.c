@@ -1,9 +1,11 @@
 #include <sys/types.h>
+#include <inttypes.h>
 #include <sys/cdefs.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <time.h>
 
 #include <assert.h>
 #include <err.h>
@@ -88,18 +90,16 @@ void initbus(struct shmif_mem **hdrp, int busfd) {
     *hdrp = hdr;
 }
 
-/* TO ADAPT */
 static void
-dowakeup(struct shmif_sc *sc)
+dowakeup(int busfd)
 {
-	struct rumpuser_iovec iov;
 	uint32_t ver = SHMIF_VERSION;
-	size_t n;
-
-	iov.iov_base = &ver;
-	iov.iov_len = sizeof(ver);
-	rumpuser_iovwrite(sc->sc_memfd, &iov, 1, IFMEM_WAKEUP, &n);
+	pwrite(busfd, &ver, sizeof(ver), IFMEM_WAKEUP);
 }
+
+#define LOCK_COOLDOWN	1001
+#define LOCK_UNLOCKED	0
+#define LOCK_LOCKED	1
 
 /*
  * This locking needs work and will misbehave severely if:
@@ -111,100 +111,81 @@ shmif_lockbus(struct shmif_mem *busmem)
 {
 	int i = 0;
 
-	while (__predict_false(atomic_cas_32(&busmem->shm_lock,
-	    LOCK_UNLOCKED, LOCK_LOCKED) == LOCK_LOCKED)) {
-		if (__predict_false(++i > LOCK_COOLDOWN)) {
+    uint32_t locked = LOCK_LOCKED, unlocked = LOCK_UNLOCKED;
+	while (!__atomic_compare_exchange(
+                    &busmem->shm_lock,
+                    &unlocked, &locked,
+                    false,
+                    __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+		if (++i > LOCK_COOLDOWN) {
 			/* wait 1ms */
-			rumpuser_clock_sleep(RUMPUSER_CLOCK_RELWALL,
-			    0, 1000*1000);
+            struct timespec rqt = {.tv_sec = 0, .tv_nsec = 1000000}, rmt;
+            int rv;
+            do {
+                rv = nanosleep(&rqt, &rmt);
+                rqt = rmt;
+            } while (rv == -1 && errno == EINTR);
 			i = 0;
 		}
 		continue;
 	}
-	membar_enter();
 }
 
 static void
 shmif_unlockbus(struct shmif_mem *busmem)
 {
-	unsigned int old;
+	uint32_t old, new = LOCK_UNLOCKED;
 
-	membar_exit();
-	old = atomic_swap_32(&busmem->shm_lock, LOCK_UNLOCKED);
-	KASSERT(old == LOCK_LOCKED);
+	__atomic_exchange(&busmem->shm_lock, &new, &old, __ATOMIC_SEQ_CST);
+	assert(old == LOCK_LOCKED);
 }
 
 static void
-shmif_start(struct ifnet *ifp)
+writebus(int memfd, struct shmif_mem *busmem,
+        void *packet, uint32_t pktsize)
 {
-	struct shmif_sc *sc = ifp->if_softc;
-	struct shmif_mem *busmem = sc->sc_busmem;
-	struct mbuf *m, *m0;
 	uint32_t dataoff;
-	uint32_t pktsize, pktwrote;
 	bool wrote = false;
 	bool wrap;
 
-	ifp->if_flags |= IFF_OACTIVE;
+    struct shmif_pkthdr sp = {};
 
-	for (;;) {
-		struct shmif_pkthdr sp;
-		struct timeval tv;
+    assert(pktsize <= ETHERMTU + ETHER_HDR_LEN);
 
-		IF_DEQUEUE(&ifp->if_snd, m0);
-		if (m0 == NULL) {
-			break;
-		}
+    struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+    sp.sp_len = pktsize;
+    sp.sp_sec = ts.tv_sec;
+    sp.sp_usec = ts.tv_nsec / 1000;
 
-		pktsize = 0;
-		for (m = m0; m != NULL; m = m->m_next) {
-			pktsize += m->m_len;
-		}
-		KASSERT(pktsize <= ETHERMTU + ETHER_HDR_LEN);
+    shmif_lockbus(busmem);
+    assert(busmem->shm_magic == SHMIF_MAGIC);
+    busmem->shm_last = shmif_nextpktoff(busmem, busmem->shm_last);
 
-		getmicrouptime(&tv);
-		sp.sp_len = pktsize;
-		sp.sp_sec = tv.tv_sec;
-		sp.sp_usec = tv.tv_usec;
+    wrap = false;
+    dataoff = shmif_buswrite(busmem,
+        busmem->shm_last, &sp, sizeof(sp), &wrap);
+    dataoff = shmif_buswrite(busmem, dataoff,
+        packet, pktsize, &wrap);
+    if (wrap) {
+        busmem->shm_gen++;
+        ERR("bus generation now %" PRIu64 "\n", busmem->shm_gen);
+    }
+    shmif_unlockbus(busmem);
 
-		bpf_mtap(ifp, m0);
+    wrote = true;
 
-		shmif_lockbus(busmem);
-		KASSERT(busmem->shm_magic == SHMIF_MAGIC);
-		busmem->shm_last = shmif_nextpktoff(busmem, busmem->shm_last);
-
-		wrap = false;
-		dataoff = shmif_buswrite(busmem,
-		    busmem->shm_last, &sp, sizeof(sp), &wrap);
-		pktwrote = 0;
-		for (m = m0; m != NULL; m = m->m_next) {
-			pktwrote += m->m_len;
-			dataoff = shmif_buswrite(busmem, dataoff,
-			    mtod(m, void *), m->m_len, &wrap);
-		}
-		KASSERT(pktwrote == pktsize);
-		if (wrap) {
-			busmem->shm_gen++;
-			DPRINTF(("bus generation now %" PRIu64 "\n",
-			    busmem->shm_gen));
-		}
-		shmif_unlockbus(busmem);
-
-		m_freem(m0);
-		wrote = true;
-
-		DPRINTF(("shmif_start: send %d bytes at off %d\n",
-		    pktsize, busmem->shm_last));
-	}
-
-	ifp->if_flags &= ~IFF_OACTIVE;
+    ERR("shmif_start: send %d bytes at off %d\n",
+        pktsize, busmem->shm_last);
 
 	/* wakeup? */
 	if (wrote) {
-		dowakeup(sc);
+		dowakeup(memfd);
 	}
 }
 
+/* TO ADAPT */
+#if 0
 /*
  * Check if we have been sleeping too long.  Basically,
  * our in-sc nextpkt must by first <= nextpkt <= last"+1".
@@ -379,6 +360,7 @@ shmif_rcv(void *arg)
 
 	kthread_exit(0);
 }
+#endif
 /*END TO ADAPT*/
 
 int main(int argc, char *argv[]) {
