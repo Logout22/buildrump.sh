@@ -36,10 +36,17 @@
 	fprintf(stderr, __VA_ARGS__); \
 }
 
+// contains the variables necessary to maintain a read state:
+struct shmif_handle {
+	uint64_t sc_devgen;
+	uint32_t sc_nextpacket;
+};
+
 int unix_socket = 0;
 char tmpbus_name[] = "busXXXXXX\0";
 int tmpbus_hdl = 0;
 struct shmif_mem *tmpbus_header = NULL;
+struct shmif_handle tmpbus_position = {};
 
 static void __attribute__((__noreturn__))
 die(int e, const char *msg)
@@ -184,8 +191,6 @@ writebus(int memfd, struct shmif_mem *busmem,
 	}
 }
 
-/* TO ADAPT */
-#if 0
 /*
  * Check if we have been sleeping too long.  Basically,
  * our in-sc nextpkt must by first <= nextpkt <= last"+1".
@@ -193,13 +198,12 @@ writebus(int memfd, struct shmif_mem *busmem,
  * with the last frame in the ring.
  */
 static __inline bool
-stillvalid_p(struct shmif_sc *sc)
+stillvalid_p(struct shmif_mem *busmem, struct shmif_handle *sc)
 {
-	struct shmif_mem *busmem = sc->sc_busmem;
 	unsigned gendiff = busmem->shm_gen - sc->sc_devgen;
 	uint32_t lastoff, devoff;
 
-	KASSERT(busmem->shm_first != busmem->shm_last);
+	assert(busmem->shm_first != busmem->shm_last);
 
 	/* normalize onto a 2x busmem chunk */
 	devoff = sc->sc_nextpacket;
@@ -208,7 +212,7 @@ stillvalid_p(struct shmif_sc *sc)
 	/* trivial case */
 	if (gendiff > 1)
 		return false;
-	KASSERT(gendiff <= 1);
+	assert(gendiff <= 1);
 
 	/* Normalize onto 2x busmem chunk */
 	if (busmem->shm_first >= lastoff) {
@@ -224,144 +228,76 @@ stillvalid_p(struct shmif_sc *sc)
 }
 
 static void
-shmif_rcv(void *arg)
+readbus(struct shmif_mem *busmem, struct shmif_handle *sc,
+        void **packet, struct shmif_pkthdr *spp)
 {
-	struct ifnet *ifp = arg;
-	struct shmif_sc *sc = ifp->if_softc;
-	struct shmif_mem *busmem;
-	struct mbuf *m = NULL;
-	struct ether_header *eth;
 	uint32_t nextpkt;
-	bool wrap, passup;
-	int error;
-	const int align
-	    = ALIGN(sizeof(struct ether_header)) - sizeof(struct ether_header);
+	bool wrap;
 
- reup:
-	mutex_enter(&sc->sc_mtx);
-	while ((ifp->if_flags & IFF_RUNNING) == 0 && !sc->sc_dying)
-		cv_wait(&sc->sc_cv, &sc->sc_mtx);
-	mutex_exit(&sc->sc_mtx);
+    ERR("waiting %" PRIu32 "/%" PRIu64 "\n",
+        sc->sc_nextpacket, sc->sc_devgen);
 
-	busmem = sc->sc_busmem;
+    shmif_lockbus(busmem);
+    assert(busmem->shm_magic == SHMIF_MAGIC);
+    assert(busmem->shm_gen >= sc->sc_devgen);
 
-	while (ifp->if_flags & IFF_RUNNING) {
-		struct shmif_pkthdr sp;
+    /* need more data? */
+    if (sc->sc_devgen == busmem->shm_gen &&
+        shmif_nextpktoff(busmem, busmem->shm_last)
+         == sc->sc_nextpacket) {
+        shmif_unlockbus(busmem);
+        // nothing to read
+        *packet = NULL;
+        memset(spp, 0, sizeof(struct shmif_pkthdr));
+        return;
+    }
 
-		if (m == NULL) {
-			m = m_gethdr(M_WAIT, MT_DATA);
-			MCLGET(m, M_WAIT);
-			m->m_data += align;
-		}
+    if (stillvalid_p(busmem, sc)) {
+        nextpkt = sc->sc_nextpacket;
+    } else {
+        assert(busmem->shm_gen > 0);
+        nextpkt = busmem->shm_first;
+        if (busmem->shm_first > busmem->shm_last)
+            sc->sc_devgen = busmem->shm_gen - 1;
+        else
+            sc->sc_devgen = busmem->shm_gen;
+        ERR("dev %p overrun, new data: %d/%" PRIu64 "\n",
+            sc, nextpkt, sc->sc_devgen);
+    }
 
-		DPRINTF(("waiting %d/%" PRIu64 "\n",
-		    sc->sc_nextpacket, sc->sc_devgen));
-		KASSERT(m->m_flags & M_EXT);
+    /*
+     * If our read pointer is ahead the bus last write, our
+     * generation must be one behind.
+     */
+    assert(!(nextpkt > busmem->shm_last
+        && sc->sc_devgen == busmem->shm_gen));
 
-		shmif_lockbus(busmem);
-		KASSERT(busmem->shm_magic == SHMIF_MAGIC);
-		KASSERT(busmem->shm_gen >= sc->sc_devgen);
+    wrap = false;
 
-		/* need more data? */
-		if (sc->sc_devgen == busmem->shm_gen &&
-		    shmif_nextpktoff(busmem, busmem->shm_last)
-		     == sc->sc_nextpacket) {
-			shmif_unlockbus(busmem);
-			error = 0;
-			rumpcomp_shmif_watchwait(sc->sc_kq);
-			if (__predict_false(error))
-				printf("shmif_rcv: wait failed %d\n", error);
-			membar_consumer();
-			continue;
-		}
+    nextpkt = shmif_busread(busmem, spp,
+        nextpkt, sizeof(struct shmif_pkthdr), &wrap);
+    assert(spp->sp_len <= ETHERMTU + ETHER_HDR_LEN);
+    /*
+     * We need to allocate memory and use shmif_busread because
+     * packets might wrap around, so they must be copied anyway.
+     */
+    *packet = malloc(spp->sp_len);
+    assert(*packet);
+    nextpkt = shmif_busread(busmem, *packet,
+        nextpkt, spp->sp_len, &wrap);
 
-		if (stillvalid_p(sc)) {
-			nextpkt = sc->sc_nextpacket;
-		} else {
-			KASSERT(busmem->shm_gen > 0);
-			nextpkt = busmem->shm_first;
-			if (busmem->shm_first > busmem->shm_last)
-				sc->sc_devgen = busmem->shm_gen - 1;
-			else
-				sc->sc_devgen = busmem->shm_gen;
-			DPRINTF(("dev %p overrun, new data: %d/%" PRIu64 "\n",
-			    sc, nextpkt, sc->sc_devgen));
-		}
+    ERR("shmif_rcv: read packet of length %d at %d\n",
+        spp->sp_len, nextpkt);
 
-		/*
-		 * If our read pointer is ahead the bus last write, our
-		 * generation must be one behind.
-		 */
-		KASSERT(!(nextpkt > busmem->shm_last
-		    && sc->sc_devgen == busmem->shm_gen));
+    sc->sc_nextpacket = nextpkt;
+    shmif_unlockbus(busmem);
 
-		wrap = false;
-		nextpkt = shmif_busread(busmem, &sp,
-		    nextpkt, sizeof(sp), &wrap);
-		KASSERT(sp.sp_len <= ETHERMTU + ETHER_HDR_LEN);
-		nextpkt = shmif_busread(busmem, mtod(m, void *),
-		    nextpkt, sp.sp_len, &wrap);
-
-		DPRINTF(("shmif_rcv: read packet of length %d at %d\n",
-		    sp.sp_len, nextpkt));
-
-		sc->sc_nextpacket = nextpkt;
-		shmif_unlockbus(sc->sc_busmem);
-
-		if (wrap) {
-			sc->sc_devgen++;
-			DPRINTF(("dev %p generation now %" PRIu64 "\n",
-			    sc, sc->sc_devgen));
-		}
-
-		/*
-		 * Ignore packets too short to possibly be valid.
-		 * This is hit at least for the first frame on a new bus.
-		 */
-		if (__predict_false(sp.sp_len < ETHER_HDR_LEN)) {
-			DPRINTF(("shmif read packet len %d < ETHER_HDR_LEN\n",
-			    sp.sp_len));
-			continue;
-		}
-
-		m->m_len = m->m_pkthdr.len = sp.sp_len;
-		m->m_pkthdr.rcvif = ifp;
-
-		/*
-		 * Test if we want to pass the packet upwards
-		 */
-		eth = mtod(m, struct ether_header *);
-		if (memcmp(eth->ether_dhost, CLLADDR(ifp->if_sadl),
-		    ETHER_ADDR_LEN) == 0) {
-			passup = true;
-		} else if (ETHER_IS_MULTICAST(eth->ether_dhost)) {
-			passup = true;
-		} else if (ifp->if_flags & IFF_PROMISC) {
-			m->m_flags |= M_PROMISC;
-			passup = true;
-		} else {
-			passup = false;
-		}
-
-		if (passup) {
-			KERNEL_LOCK(1, NULL);
-			bpf_mtap(ifp, m);
-			ifp->if_input(ifp, m);
-			KERNEL_UNLOCK_ONE(NULL);
-			m = NULL;
-		}
-		/* else: reuse mbuf for a future packet */
-	}
-	m_freem(m);
-	m = NULL;
-
-	if (!sc->sc_dying)
-		goto reup;
-
-	kthread_exit(0);
+    if (wrap) {
+        sc->sc_devgen++;
+        DPRINTF(("dev %p generation now %" PRIu64 "\n",
+            sc, sc->sc_devgen));
+    }
 }
-#endif
-/*END TO ADAPT*/
 
 int main(int argc, char *argv[]) {
     atexit(cleanup);
