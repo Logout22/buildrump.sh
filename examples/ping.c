@@ -88,7 +88,7 @@ int main(int argc, char *argv[]) {
 
 	char const *ip_address = "10.93.48.50";
 	err("Setting IP address %s\n", ip_address);
-    rump_pub_netconfig_ipv4_ifaddr("shmif0", ip_address, "255.255.255.255");
+    rump_pub_netconfig_ipv4_ifaddr("shmif0", ip_address, "255.255.255.0");
     rump_pub_netconfig_ifup("shmif0");
 
 	err("Creating Socket\n");

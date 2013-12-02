@@ -1,15 +1,19 @@
-define nstep
-set $foo = $arg0
-while ($foo--)
-step
-end
-end
-#set logging on
-#set logging file trace.log
-break main
+#define nstep
+#set $foo = $arg0
+#while ($foo--)
+#step
+#end
+#end
+##set logging on
+##set logging file trace.log
+#break main
+#run
+#break ping.c:53
+#c
+#nstep 10000
+#c
+#q
+
+#break swarm.c:162
 run
-break ping.c:53
-c
-nstep 10000
-c
-q
+

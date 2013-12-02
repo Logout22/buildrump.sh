@@ -157,8 +157,10 @@ shmif_lockbus(struct shmif_mem *busmem)
 	while (!__atomic_compare_exchange(
                     &busmem->shm_lock,
                     &unlocked, &locked,
-                    false,
+                    true,
                     __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+        locked = LOCK_LOCKED;
+        unlocked = LOCK_UNLOCKED;
 		if (++i > LOCK_COOLDOWN) {
 			/* wait 1ms */
             struct timespec rqt = {.tv_sec = 0, .tv_nsec = 1000000}, rmt;
@@ -171,6 +173,9 @@ shmif_lockbus(struct shmif_mem *busmem)
 		}
 		continue;
 	}
+
+    // just to make absolutely sure we locked it
+    assert(busmem->shm_lock == LOCK_LOCKED);
 }
 
 static void
@@ -269,8 +274,8 @@ readbus(struct shmif_mem *busmem, struct shmif_handle *sc,
 	uint32_t nextpkt;
 	bool wrap;
 
-    ERR("waiting %" PRIu32 "/%" PRIu64 "\n",
-        sc->sc_nextpacket, sc->sc_devgen);
+    /*ERR("waiting %" PRIu32 "/%" PRIu64 "\n",
+        sc->sc_nextpacket, sc->sc_devgen);*/
 
     shmif_lockbus(busmem);
     assert(busmem->shm_magic == SHMIF_MAGIC);
@@ -382,7 +387,7 @@ int main(int argc, char *argv[]) {
     }
     initbus(&tmpbus_header, tmpbus_hdl);
 
-    ERR("Allocating TAP device");
+    ERR("Allocating TAP device\n");
     char devname[] = "tun0";
     tapfd = tun_alloc(devname);
     if (tapfd <= 0) {
@@ -434,6 +439,9 @@ int main(int argc, char *argv[]) {
     pthread_create(&writethread, NULL, buswritethread, NULL);
 
     sleep(120);
+
+    pthread_join(writethread, NULL);
+    pthread_join(readthread, NULL);
 
 	die(0, NULL);
 }
