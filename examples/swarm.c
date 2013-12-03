@@ -33,6 +33,14 @@
 
 #include <pthread.h>
 
+#include <event2/event.h>
+#include <event2/event_struct.h>
+#if !defined(LIBEVENT_VERSION_NUMBER) || LIBEVENT_VERSION_NUMBER < 0x02000100
+#error "This version of Libevent is not supported; Get 2.0.1-alpha or later."
+#endif
+
+#include <glib.h>
+
 #include "common.h"
 #include "shmifvar.h"
 
@@ -47,17 +55,32 @@ struct shmif_handle {
 	uint32_t sc_nextpacket;
 };
 
+struct unxsock_msg {
+    int us_ver;
+}
+
+struct getshm_msg {
+    struct unxsockmsg gs_header;
+    int gs_pid;
+}
+
+struct tmpbus {
+    char tmpbus_name[] = "busXXXXXX\0";
+    int tmpbus_hdl = 0;
+    struct shmif_mem *tmpbus_header = NULL;
+    struct shmif_handle tmpbus_position = {};
+};
+
 int unix_socket = 0;
-char tmpbus_name[] = "busXXXXXX\0";
-int tapfd = 0, tmpbus_hdl = 0;
+struct event *unix_socket_listener_event = NULL;
+int tapfd = 0;
+GHashTable *processes = NULL;
 bool terminate = false;
-struct shmif_mem *tmpbus_header = NULL;
-struct shmif_handle tmpbus_position = {};
+struct event_base *ev_base;
 
 static void __attribute__((__noreturn__))
 die(int e, const char *msg)
 {
-    terminate = true;
 	if (msg)
 		warn("%s: %d", msg, e);
 	exit(e);
@@ -68,10 +91,23 @@ cleanup_sig(int signum) {
 	die(signum, NULL);
 }
 
+void deallocate_bus(gpointer dataptr) {
+    struct tmpbus *busptr = dataptr;
+    if (busptr->tmpbus_header) {
+        munmap(busptr->tmpbus_header, BUSMEM_SIZE);
+    }
+    if (busptr->tmpbus_hdl) {
+    	close(busptr->tmpbus_hdl);
+	    unlink(busptr->tmpbus_name);
+    }
+    free(busptr);
+}
+
 void cleanup() {
-    // NOTE: Rump kernel is already shut down at this point
-    // (although at some point this program should not need
-    // a rump kernel any more)
+    g_hash_table_unref(processes);
+    if (unix_socket_listener_event) {
+        event_free(unix_socket_listener_event);
+    }
     if (unix_socket) {
         close(unix_socket);
         unlink(SOCK_FN);
@@ -79,12 +115,8 @@ void cleanup() {
     if (tapfd) {
         close(tapfd);
     }
-    if (tmpbus_header) {
-        munmap(tmpbus_header, BUSMEM_SIZE);
-    }
-    if (tmpbus_hdl) {
-    	close(tmpbus_hdl);
-	    unlink(tmpbus_name);
+    if (ev_base) {
+        event_base_free(ev_base);
     }
 }
 
@@ -370,14 +402,14 @@ void *buswritethread(void *ignore) {
     return NULL;
 }
 
-int main(int argc, char *argv[]) {
-    atexit(cleanup);
-	struct sigaction sigact = {
-		.sa_handler = cleanup_sig
-	};
-	sigaction(SIGINT, &sigact, NULL);
-	sigaction(SIGTERM, &sigact, NULL);
+void unix_accept(evutil_socket_t sock, short events, void *ignore) {
+    int sndfnamesock = accept(unix_socket, NULL, 0);
+    if (sndfnamesock <= 0) {
+        die(errno, "accept");
+    }
 
+    struct getshm_msg regproc;
+    struct tmpbus newbus;
 	ERR("Creating Bus\n");
 	assert(*mktemp(tmpbus_name) != 0);
 	tmpbus_hdl = open(tmpbus_name, O_RDWR | O_CREAT | O_TRUNC, 0600);
@@ -386,6 +418,28 @@ int main(int argc, char *argv[]) {
         die(errno, "open tmpbus");
     }
     initbus(&tmpbus_header, tmpbus_hdl);
+    write(sndfnamesock, tmpbus_name, sizeof(tmpbus_name));
+    close(sndfnamesock);
+}
+
+int __attribute__((__noreturn__))
+main(int argc, char *argv[]) {
+    atexit(cleanup);
+	struct sigaction sigact = {
+		.sa_handler = cleanup_sig
+	};
+	sigaction(SIGINT, &sigact, NULL);
+	sigaction(SIGTERM, &sigact, NULL);
+
+    //can eventually be disabled
+    event_enable_debug_mode();
+
+    processes = g_hash_table_new_full(NULL, NULL, NULL, deallocate_bus);
+
+    ev_base = event_base_new();
+    if (ev_base == NULL) {
+        die(0, "event_base_new");
+    }
 
     ERR("Allocating TAP device\n");
     char devname[] = "tun0";
@@ -401,6 +455,8 @@ int main(int argc, char *argv[]) {
         unix_socket = 0;
         die(errno, "socket");
     }
+    evutil_make_socket_nonblocking(unix_socket);
+
     struct sockaddr_un sockaddr = {
         .sun_family = AF_UNIX,
         .sun_path = SOCK_FN,
@@ -410,29 +466,23 @@ int main(int argc, char *argv[]) {
                 (struct sockaddr *)&sockaddr,
                 sizeof(sockaddr))) {
         perror("bind");
-        return errno;
+        die(errno, "bind");
     }
     // 128 used to be hard-coded into the linux kernel
     // and is still the default upper limit for the backlog
     assert(listen(unix_socket, 128) == 0);
 
-/*
-    rump_pub_shmif_create(tmpbus_name, 0);
-
-	char const *ip_address = "10.165.8.1";
-	ERR("Setting IP address %s\n", ip_address);
-    rump_pub_netconfig_ipv4_ifaddr("shmif0", ip_address, "255.255.255.0");
-	rump_pub_netconfig_ifup("shmif0");
-*/
-
     ERR("Waiting for a client to send the bus file name to\n");
-    int sndfnamesock = accept(unix_socket, NULL, 0);
-    if (sndfnamesock <= 0) {
-        die(errno, "accept");
+    unix_socket_listener_event = event_new(
+            ev_base, unix_socket, EV_READ|EV_PERSIST,
+            unix_accept, NULL);
+    if (unix_socket_listener_event == NULL) {
+        die(0, "event_new");
     }
-    write(sndfnamesock, tmpbus_name, sizeof(tmpbus_name));
-    close(sndfnamesock);
+    event_add(unix_socket_listener_event, NULL);
+    event_base_loop(ev_base, EVLOOP_NO_EXIT_ON_EMPTY);
 
+    /*
     ERR("Creating send/receive threads\n");
     pthread_t readthread, writethread;
     pthread_create(&readthread, NULL, busreadthread, NULL);
@@ -440,9 +490,11 @@ int main(int argc, char *argv[]) {
 
     sleep(120);
 
+    terminate = true;
     pthread_join(writethread, NULL);
     pthread_join(readthread, NULL);
+    die(0, NULL);
 
-	die(0, NULL);
+    */
 }
 
