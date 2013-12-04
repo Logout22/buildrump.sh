@@ -55,8 +55,11 @@ struct shmif_handle {
 	uint32_t sc_nextpacket;
 };
 
+#define USOCK_VERSION 1
+
 struct unxsock_msg {
-    int us_ver;
+    int um_ver;
+    int um_msgid;
 }
 
 struct getshm_msg {
@@ -156,7 +159,6 @@ void initbus(struct shmif_mem **hdrp, int busfd) {
             PROT_READ|PROT_WRITE, MAP_FILE|MAP_SHARED,
             busfd, 0);
 	if (hdr == MAP_FAILED) {
-        hdr = NULL;
         die(errno, "map");
     }
     hdr->shm_magic = SHMIF_MAGIC;
@@ -189,7 +191,7 @@ shmif_lockbus(struct shmif_mem *busmem)
 	while (!__atomic_compare_exchange(
                     &busmem->shm_lock,
                     &unlocked, &locked,
-                    true,
+                    false,
                     __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
         locked = LOCK_LOCKED;
         unlocked = LOCK_UNLOCKED;
@@ -371,6 +373,7 @@ readbus(struct shmif_mem *busmem, struct shmif_handle *sc,
     }
 }
 
+/*
 void *busreadthread(void *ignore) {
     void *packet;
     struct shmif_pkthdr pkthdr = {};
@@ -401,25 +404,75 @@ void *buswritethread(void *ignore) {
     }
     return NULL;
 }
+*/
+
+void readstruct(int fd, void* structp, size_t structsize) {
+    size_t bytes_total = structsize;
+           bytes_to_read = bytes_total;
+    // proceed bytewise (int8_t*)
+    int8_t *hdrp = structp;
+    while (bytes_to_read > 0) {
+        ssize_t this_read = read(fd, hdrp, bytes_to_read);
+        if (this_read <= 0) {
+            die(errno, "read from UNIX socket");
+        }
+        usm_hdrp += this_read
+        bytes_to_read -= this_read;
+    }
+    // no negative values (overreads)
+    assert(bytes_to_read == 0);
+}
 
 void unix_accept(evutil_socket_t sock, short events, void *ignore) {
-    int sndfnamesock = accept(unix_socket, NULL, 0);
-    if (sndfnamesock <= 0) {
+    int fd = accept(sock, NULL, 0);
+    if (fd <= 0) {
         die(errno, "accept");
-    }
+    } else if (fd > FD_SETSIZE) {
+        close(fd);
+    } else {
+        /* handle clients one by one
+         * to avoid races on the process table
+         * (registering is not done often, so no need to hurry)
+         */
+        struct getshm_msg regproc;
+        readstruct(fd, (void*) &regproc.gs_header, sizeof(regproc.gs_header));
+        if (regproc.gs_header.um_ver > USOCK_VERSION ||
+                regproc.gs_header.um_msgid != SWARM_GETSHM) {
+            ERR("Unsupported client\n");
+            close(fd);
+            return
+        }
+        pid_t caller_pid = -1;
+        readstruct(fd, &caller_pid, sizeof(pid_t));
+        if (caller_pid < 0) {
+            ERR("PID < 0 - Closing\n");
+            close(fd);
+            return;
+        }
 
-    struct getshm_msg regproc;
-    struct tmpbus newbus;
-	ERR("Creating Bus\n");
-	assert(*mktemp(tmpbus_name) != 0);
-	tmpbus_hdl = open(tmpbus_name, O_RDWR | O_CREAT | O_TRUNC, 0600);
-    if(tmpbus_hdl <= 0) {
-        tmpbus_hdl = 0;
-        die(errno, "open tmpbus");
+        ERR("Creating Bus\n");
+        struct tmpbus *newbus = malloc(sizeof(struct tmpbus));
+        assert(newbus);
+        memset(newbus, 0, sizeof(struct tmpbus));
+        g_hash_table_insert(
+                processes, GINT_TO_POINTER(caller_pid), newbus);
+
+        assert(*mktemp(newbus->tmpbus_name) != 0);
+        newbus->tmpbus_hdl = open(
+                newbus->tmpbus_name,
+                O_RDWR | O_CREAT | O_TRUNC,
+                0644);
+        if(newbus->tmpbus_hdl <= 0) {
+            newbus->tmpbus_hdl = 0;
+            die(errno, "open tmpbus");
+        }
+        initbus(&newbus->tmpbus_header, newbus->tmpbus_hdl);
+        // TODO: libevent handlers for bus read/write
+
+        // now answer the client with the bus file name
+        write(fd, newbus->tmpbus_name, sizeof(newbus->tmpbus_name));
+        close(fd);
     }
-    initbus(&tmpbus_header, tmpbus_hdl);
-    write(sndfnamesock, tmpbus_name, sizeof(tmpbus_name));
-    close(sndfnamesock);
 }
 
 int __attribute__((__noreturn__))
