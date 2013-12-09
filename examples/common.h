@@ -3,7 +3,7 @@
 #define HIVE_BIND 2
 
 //defining some BSD specific macros
-#define	offsetof(s, m)((size_t)(&(((s *)0)->m)))
+#include <stddef.h>
 
 #include <linux/if_ether.h>
 #ifndef ETHER_HDR_LEN

@@ -8,69 +8,69 @@
 #include <err.h>
 
 #define ERR(...) { \
-	fprintf(stderr, "srv: "); \
-	fprintf(stderr, __VA_ARGS__); \
+    fprintf(stderr, "srv: "); \
+    fprintf(stderr, __VA_ARGS__); \
 }
 
 static void __attribute__((__noreturn__))
 die(int e, const char *msg)
 {
-	if (msg)
-		warn("%s: %d", msg, e);
-	exit(e);
+    if (msg)
+        warn("%s: %d", msg, e);
+    exit(e);
 }
 
 int main(int argc, char *argv[]) {
-	ERR("Creating Socket\n");
+    ERR("Creating Socket\n");
     int tcpsock = socket(AF_INET, SOCK_STREAM, 0);
     if (tcpsock <= 0) {
         die(errno, "socket");
     }
 
-	short const portnum = 26417;
-	ERR("Binding to port %d\n", portnum);
+    short const portnum = 26417;
+    ERR("Binding to port %d\n", portnum);
     struct sockaddr_in sin = {
         .sin_family = AF_INET,
         .sin_port = htons(portnum),
     };
-	// listen from all addresses
+    // listen from all addresses
     memset(&sin.sin_addr, 0, sizeof(sin.sin_addr));
     int res = bind(tcpsock, (struct sockaddr*) &sin, sizeof(sin));
     if (res != 0) {
         die(errno, "bind");
     }
 
-	ERR("Listening (Queue length 120)\n");
+    ERR("Listening (Queue length 120)\n");
     res = listen(tcpsock, 120);
     if (res != 0) {
         die(errno, "listen");
     }
 
-	ERR("Accepting...\n");
+    ERR("Accepting...\n");
     int rcvsock = accept(tcpsock, NULL, 0);
     if (rcvsock <= 0) {
         die(errno, "accept");
     }
 
-	int const bufsize = 50;
+    int const bufsize = 50;
     char rbuf[bufsize + 1];
     rbuf[bufsize] = 0;
-	//ERR("Reading at most %d bytes\n", bufsize);
-	for(int i = 0; i < 4; i++) {
-		res = read(rcvsock, rbuf, bufsize);
-		if (res <= 0) {
-			die(errno, "read");
-		}
-		ERR("rcvd %s\n", rbuf);
-		sleep(1);
+    //ERR("Reading at most %d bytes\n", bufsize);
+    for(int i = 0; i < 4; i++) {
+        res = read(rcvsock, rbuf, bufsize);
+        if (res <= 0) {
+            die(errno, "read");
+        }
+        ERR("rcvd %s\n", rbuf);
+        sleep(1);
         char const wbuf[] = "Pong.\0";
         res = write(rcvsock, wbuf, sizeof(wbuf));
         if (res <= 0) {
             die(errno, "write");
         }
-	}
+    }
     close(rcvsock);
 
-	ERR("Closing\n");
+    ERR("Closing\n");
     close(tcpsock);
 }

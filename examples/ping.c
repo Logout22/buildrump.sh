@@ -30,30 +30,30 @@ static void __attribute__((__noreturn__))
 die(int e, const char *msg)
 {
 
-	if (msg)
-		warnx("%s: %d", msg, e);
-	rump_sys_reboot(0, NULL);
-	exit(e);
+    if (msg)
+        warnx("%s: %d", msg, e);
+    rump_sys_reboot(0, NULL);
+    exit(e);
 }
 
 void __attribute__((__noreturn__))
 cleanup(int signum) {
-	die(signum, NULL);
+    die(signum, NULL);
 }
 
 #define err(...) { \
-	fprintf(stderr, "clt: "); \
-	fprintf(stderr, __VA_ARGS__); \
+    fprintf(stderr, "clt: "); \
+    fprintf(stderr, __VA_ARGS__); \
 }
 
 int main(int argc, char *argv[]) {
-	rump_init();
+    rump_init();
 
-	struct sigaction sigact = {
-		.sa_handler = cleanup
-	};
-	sigaction(SIGINT, &sigact, NULL);
-	sigaction(SIGTERM, &sigact, NULL);
+    struct sigaction sigact = {
+        .sa_handler = cleanup
+    };
+    sigaction(SIGINT, &sigact, NULL);
+    sigaction(SIGTERM, &sigact, NULL);
 
     err("Fetching bus name\n");
     int unix_socket = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -83,23 +83,23 @@ int main(int argc, char *argv[]) {
         die(errno, "stat");
     }
 
-	err("Creating Bus\n");
+    err("Creating Bus\n");
     rump_pub_shmif_create(rbuf, 0);
 
-	char const *ip_address = "10.93.48.50";
-	err("Setting IP address %s\n", ip_address);
+    char const *ip_address = "10.93.48.50";
+    err("Setting IP address %s\n", ip_address);
     rump_pub_netconfig_ipv4_ifaddr("shmif0", ip_address, "255.255.255.0");
     rump_pub_netconfig_ifup("shmif0");
 
-	err("Creating Socket\n");
+    err("Creating Socket\n");
     int tcpsock = rump_sys_socket(PF_INET, SOCK_STREAM, 0);
     if (tcpsock <= 0) {
         die(errno, "socket");
     }
 
-	char const *srv_address = "10.93.48.2";
-	short const portnum = 26417;
-	err("Connecting to %s:%d\n", srv_address, portnum);
+    char const *srv_address = "10.93.48.2";
+    short const portnum = 26417;
+    err("Connecting to %s:%d\n", srv_address, portnum);
     struct sockaddr_in sin = {
         .sin_family = AF_INET,
         .sin_port = htons(portnum),
@@ -111,7 +111,7 @@ int main(int argc, char *argv[]) {
     }
 
     int i;
-	for(i = 0; i < 4; i++) {
+    for(i = 0; i < 4; i++) {
         char const wbuf[] = "Ping.\0";
         res = rump_sys_write(tcpsock, wbuf, sizeof(wbuf));
         if (res <= 0) {
@@ -122,10 +122,10 @@ int main(int argc, char *argv[]) {
             die(errno, "read");
         }
         err("rcvd %s\n", rbuf);
-		sleep(1);
+        sleep(1);
     }
 
     rump_sys_close(tcpsock);
 
-	die(0, NULL);
+    die(0, NULL);
 }
