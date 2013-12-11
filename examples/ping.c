@@ -69,6 +69,15 @@ int main(int argc, char *argv[]) {
         die(errno, "connect");
     }
 
+    struct getshm_msg msg1 = {
+        .gs_header = {
+            .um_ver = USOCK_VERSION,
+            .um_msgid = SWARM_GETSHM
+        },
+        .gs_pid = getpid(),
+    };
+    write(unix_socket, &msg1, sizeof(msg1));
+
     int const bufsize = 50;
     char rbuf[bufsize + 1];
     rbuf[bufsize] = 0;

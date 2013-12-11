@@ -25,6 +25,7 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/inotify.h>
 
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -43,7 +44,6 @@
 
 #include "common.h"
 #include "shmifvar.h"
-#include "rumpcomp_user.h"
 
 #define ERR(...) { \
     fprintf(stderr, "swarm: "); \
@@ -56,33 +56,27 @@ struct shmif_handle {
     uint32_t sc_nextpacket;
 };
 
-#define USOCK_VERSION 1
-
-struct unxsock_msg {
-    int um_ver;
-    int um_msgid;
-};
-
-struct getshm_msg {
-    struct unxsock_msg gs_header;
-    int gs_pid;
-};
-
+/* NOTE: Do NOT instantiate struct tmpbus directly.
+ * Use something like:
+ *
+ * struct tmpbus *myvar = allocate_bus();
+ * ...
+ * deallocate_bus(myvar);
+ */
 struct tmpbus {
     char tmpbus_name[10];
     int tmpbus_hdl;
     struct shmif_mem *tmpbus_header;
     struct shmif_handle *tmpbus_position;
-    int tmpbus_queuehdl;
     struct event *tmpbus_event;
     sem_t *tmpbus_lock;
 };
 
-int unix_socket = 0;
-struct event *tap_listener_event = NULL,
-             *unix_socket_listener_event = NULL;
-int tapfd = 0;
-GHashTable *processes = NULL;
+int unix_socket = 0, tapfd = 0, inotify_hdl = 0;
+struct event *unix_socket_listener_event = NULL,
+             *tap_listener_event = NULL,
+             *inotify_listener_event = NULL;
+GHashTable *busses = NULL;
 bool terminate = false;
 struct event_base *ev_base;
 
@@ -122,9 +116,6 @@ void deallocate_bus(gpointer dataptr) {
     if (busptr->tmpbus_lock) {
         sem_close(busptr->tmpbus_lock);
     }
-    if (busptr->tmpbus_queuehdl) {
-        close(busptr->tmpbus_queuehdl);
-    }
     if (busptr->tmpbus_header) {
         munmap(busptr->tmpbus_header, BUSMEM_SIZE);
     }
@@ -132,17 +123,22 @@ void deallocate_bus(gpointer dataptr) {
         close(busptr->tmpbus_hdl);
         unlink(busptr->tmpbus_name);
     }
+    free(busptr->tmpbus_position);
     free(busptr);
 }
 
 void cleanup() {
-    g_hash_table_unref(processes);
+    ERR("Exiting\n");
+    g_hash_table_unref(busses);
     if (unix_socket_listener_event) {
         event_free(unix_socket_listener_event);
     }
     if (unix_socket) {
         close(unix_socket);
         unlink(SOCK_FN);
+    }
+    if (inotify_hdl) {
+        close(inotify_hdl);
     }
     if (tapfd) {
         close(tapfd);
@@ -179,26 +175,40 @@ int tun_alloc(char *dev)
   return fd;
 }
 
-void initbus(struct shmif_mem **hdrp, int busfd, pid_t caller_pid) {
+int initbus(struct shmif_mem **hdrp, int busfd, pid_t caller_pid) {
     if (ftruncate(busfd, BUSMEM_SIZE) != 0) {
-        die(errno, "ftruncate");
+        ERR("ftruncate failed\n");
+        return errno;
     }
 
     struct shmif_mem *hdr = mmap(NULL, BUSMEM_SIZE,
             PROT_READ|PROT_WRITE, MAP_FILE|MAP_SHARED,
             busfd, 0);
     if (hdr == MAP_FAILED) {
-        die(errno, "map");
+        ERR("map failed\n");
+        return errno;
     }
-	rumpcomp_shmif_lockall();
+
+	sem_t *shmif_lockall_sem = sem_open("rumpuser_shmif_lockall",
+			O_CREAT, 0644, 1);
+	assert(shmif_lockall_sem != SEM_FAILED);
+	int result;
+	do {
+		result = sem_wait(shmif_lockall_sem);
+	} while (result == EINTR);
+	assert(result == 0);
+
 	if (hdr->shm_magic == 0) {
         hdr->shm_magic = SHMIF_MAGIC;
         hdr->shm_first = BUSMEM_DATASIZE;
         hdr->shm_lock = caller_pid;
     }
-	rumpcomp_shmif_unlockall();
+
+	assert(sem_post(shmif_lockall_sem) == 0);
+	sem_close(shmif_lockall_sem);
 
     *hdrp = hdr;
+    return 0;
 }
 
 static void
@@ -395,17 +405,27 @@ void *busreadthread(void *ignore) {
 }
 */
 
-void handle_busread(evutil_socket_t eventfd, short events, void *arg) {
-    struct tmpbus *thisbus = (struct tmpbus *) arg;
+void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
+    assert(eventfd == inotify_hdl);
+    struct inotify_event iEvent;
 
-    void *packet;
-    struct shmif_pkthdr pkthdr = {};
-    readbus(thisbus, &packet, &pkthdr);
-    if (packet) {
-        // TODO filter frames here
-        write(tapfd, packet, pkthdr.sp_len);
-    } else {
-        ERR("Woke up but nothing to read...\n");
+    while (read(inotify_hdl, &iEvent, sizeof(iEvent)) > 0) {
+        struct tmpbus *thisbus = (struct tmpbus *) g_hash_table_lookup(
+                busses, GINT_TO_POINTER(iEvent.wd));
+        if (thisbus == NULL) {
+            ERR("Notified for wrong watch (FD #%d)!\n", iEvent.wd);
+            continue;
+        }
+
+        void *packet;
+        do {
+            struct shmif_pkthdr pkthdr = {};
+            readbus(thisbus, &packet, &pkthdr);
+            if (packet) {
+                // TODO filter frames here
+                write(tapfd, packet, pkthdr.sp_len);
+            }
+        } while(packet);
     }
 }
 
@@ -434,17 +454,11 @@ void handle_tapread(evutil_socket_t sockfd, short events, void *ignore) {
     int const bufsize = 65*1024;
     char readbuf[bufsize];
     ssize_t pktlen;
-    pktlen = read(tapfd, readbuf, bufsize);
-    if (pktlen < 0) {
-        ERR("Error reading from tap:\n");
-        perror("read");
-        return;
-    }
-    if (pktlen > 0) {
+    while ((pktlen = read(tapfd, readbuf, bufsize)) > 0) {
         // TODO filter dest buses here
         GHashTableIter it;
         gpointer key, value;
-        for(g_hash_table_iter_init(&it, processes);
+        for(g_hash_table_iter_init(&it, busses);
                 g_hash_table_iter_next(&it, &key, &value);
                 ) {
             struct tmpbus *thisbus = (struct tmpbus*) value;
@@ -477,76 +491,82 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
     int fd = accept(sock, NULL, 0);
     if (fd <= 0) {
         die(errno, "accept");
+        return;
     } else if (fd > FD_SETSIZE) {
         close(fd);
-    } else {
-        /* handle clients one by one
-         * to avoid races on the process table
-         * (registering is not done often, so no need to hurry)
-         */
-        struct getshm_msg regproc;
-        readstruct(fd, (void*) &regproc.gs_header, sizeof(regproc.gs_header));
-        if (regproc.gs_header.um_ver > USOCK_VERSION ||
-                regproc.gs_header.um_msgid != SWARM_GETSHM) {
-            ERR("Unsupported client\n");
-            close(fd);
-            return;
-        }
-        pid_t caller_pid = -1;
-        readstruct(fd, &caller_pid, sizeof(pid_t));
-        if (caller_pid < 0) {
-            ERR("PID < 0 - Closing\n");
-            close(fd);
-            return;
-        }
-
-        ERR("Creating Bus\n");
-        struct tmpbus *newbus = allocate_bus();
-        /* This is sort of a "(very) lazy garbage collection":
-         * When there is a process of that name in the table,
-         * the registering process replaces its bus, thereby
-         * causing the latter to be destroyed.
-         * XXX: processes can disconnect others from the
-         * network (intentionally or not)
-         * solution: ask a third party (kernel?) about the PID
-         * of the caller
-         */
-        g_hash_table_insert(
-                processes, GINT_TO_POINTER(caller_pid), newbus);
-
-        newbus->tmpbus_hdl = open(
-                newbus->tmpbus_name,
-                O_RDWR | O_CREAT | O_TRUNC,
-                0644);
-        if(newbus->tmpbus_hdl <= 0) {
-            newbus->tmpbus_hdl = 0;
-            die(errno, "open tmpbus");
-        }
-        initbus(&newbus->tmpbus_header, newbus->tmpbus_hdl, caller_pid);
-        int const sem_name_len = 30;
-        char shmif_sem_name[sem_name_len];
-        snprintf(shmif_sem_name, sem_name_len,
-                "rumpuser_shmif_lock_%i", caller_pid);
-        newbus->tmpbus_lock = sem_open(shmif_sem_name, O_CREAT, 0644, 1);
-        assert(newbus->tmpbus_lock != SEM_FAILED);
-
-        int result;
-        if ((result = rumpcomp_shmif_watchsetup(
-                    &newbus->tmpbus_queuehdl, newbus->tmpbus_hdl)) != 0) {
-            die(result, "watchsetup");
-        }
-        newbus->tmpbus_event = event_new(
-            ev_base, newbus->tmpbus_queuehdl, EV_READ|EV_PERSIST,
-            handle_busread, newbus);
-        if (newbus->tmpbus_event == NULL) {
-            die(0, "event_new");
-        }
-        event_add(newbus->tmpbus_event, NULL);
-
-        // now answer the client with the bus file name
-        write(fd, newbus->tmpbus_name, sizeof(newbus->tmpbus_name));
-        close(fd);
+        return;
     }
+
+    /* handle clients one by one
+     * to avoid races on the process table
+     * (registering is not done often, so no need to hurry)
+     */
+    struct getshm_msg regproc;
+    readstruct(fd, &regproc.gs_header, sizeof(regproc.gs_header));
+    if (regproc.gs_header.um_ver > USOCK_VERSION ||
+            regproc.gs_header.um_msgid != SWARM_GETSHM) {
+        ERR("Unsupported client\n");
+        close(fd);
+        return;
+    }
+    pid_t caller_pid = -1;
+    readstruct(fd, &caller_pid, sizeof(pid_t));
+    if (caller_pid < 0) {
+        ERR("PID < 0 - Closing\n");
+        close(fd);
+        return;
+    }
+
+    ERR("Creating Bus\n");
+    struct tmpbus *newbus = allocate_bus();
+
+    newbus->tmpbus_hdl = open(
+            newbus->tmpbus_name,
+            O_RDWR | O_CREAT | O_TRUNC,
+            0644);
+    if (newbus->tmpbus_hdl <= 0) {
+        newbus->tmpbus_hdl = 0;
+        deallocate_bus(newbus);
+        die(errno, "open tmpbus");
+    }
+    if (initbus(&newbus->tmpbus_header,
+                newbus->tmpbus_hdl,
+                caller_pid) != 0) {
+        deallocate_bus(newbus);
+        die(errno, "init tmpbus");
+    }
+
+    ERR("Creating semaphore\n");
+    int const sem_name_len = 30;
+    char shmif_sem_name[sem_name_len];
+    snprintf(shmif_sem_name, sem_name_len,
+            "rumpuser_shmif_lock_%i", caller_pid);
+    newbus->tmpbus_lock = sem_open(shmif_sem_name, O_CREAT, 0644, 1);
+    assert(newbus->tmpbus_lock != SEM_FAILED);
+
+    ERR("Add new event\n");
+    int new_wd = inotify_add_watch(
+            inotify_hdl, newbus->tmpbus_name, IN_MODIFY);
+    if (new_wd < 0) {
+        deallocate_bus(newbus);
+        die(errno, "inotify watch");
+    }
+    g_hash_table_insert(
+            busses, GINT_TO_POINTER(new_wd), newbus);
+
+    /*
+    newbus->tmpbus_event = event_new(
+        ev_base, newbus->tmpbus_hdl, EV_READ|EV_PERSIST,
+        handle_busread, newbus);
+    if (newbus->tmpbus_event == NULL) {
+        die(0, "event_new");
+    }
+    event_add(newbus->tmpbus_event, NULL);
+    */
+
+    // now answer the client with the bus file name
+    write(fd, newbus->tmpbus_name, sizeof(newbus->tmpbus_name));
+    close(fd);
 }
 
 int main(int argc, char *argv[]) {
@@ -560,7 +580,7 @@ int main(int argc, char *argv[]) {
     //can eventually be disabled
     event_enable_debug_mode();
 
-    processes = g_hash_table_new_full(NULL, NULL, NULL, deallocate_bus);
+    busses = g_hash_table_new_full(NULL, NULL, NULL, deallocate_bus);
 
     ev_base = event_base_new();
     if (ev_base == NULL) {
@@ -574,6 +594,7 @@ int main(int argc, char *argv[]) {
         tapfd = 0;
         die(errno, "open tap");
     }
+    evutil_make_socket_nonblocking(tapfd);
     tap_listener_event = event_new(
             ev_base, tapfd, EV_READ|EV_PERSIST,
             handle_tapread, NULL);
@@ -581,6 +602,21 @@ int main(int argc, char *argv[]) {
         die(0, "tap event_new");
     }
     event_add(tap_listener_event, NULL);
+
+    ERR("Initialising inotify\n");
+    inotify_hdl = inotify_init1(IN_NONBLOCK);
+    if (inotify_hdl <= 0) {
+        inotify_hdl = 0;
+        die(errno, "inotify");
+    }
+    ERR("Creating Inotify event\n");
+    inotify_listener_event = event_new(
+            ev_base, inotify_hdl, EV_READ|EV_PERSIST,
+            handle_busread, NULL);
+    if (inotify_listener_event == NULL) {
+        die(0, "event_new");
+    }
+    event_add(inotify_listener_event, NULL);
 
     ERR("Creating UNIX socket\n");
     unix_socket = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -605,7 +641,7 @@ int main(int argc, char *argv[]) {
     // and is still the default upper limit for the backlog
     assert(listen(unix_socket, 128) == 0);
 
-    ERR("Waiting for a client to send the bus file name to\n");
+    ERR("Creating UNIX socket listener event\n");
     unix_socket_listener_event = event_new(
             ev_base, unix_socket, EV_READ|EV_PERSIST,
             unix_accept, NULL);
@@ -614,7 +650,8 @@ int main(int argc, char *argv[]) {
     }
     event_add(unix_socket_listener_event, NULL);
 
-    event_base_loop(ev_base, EVLOOP_NO_EXIT_ON_EMPTY);
+    ERR("Waiting for a client to send the bus file name to\n");
+    event_base_dispatch(ev_base);
 
     /*
     ERR("Creating send/receive threads\n");

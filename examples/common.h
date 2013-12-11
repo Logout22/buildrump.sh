@@ -2,6 +2,18 @@
 #define SWARM_GETSHM 1
 #define HIVE_BIND 2
 
+#define USOCK_VERSION 1
+
+struct unxsock_msg {
+    int um_ver;
+    int um_msgid;
+};
+
+struct getshm_msg {
+    struct unxsock_msg gs_header;
+    int gs_pid;
+};
+
 //defining some BSD specific macros
 #include <stddef.h>
 
