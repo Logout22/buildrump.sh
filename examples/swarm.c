@@ -405,6 +405,46 @@ void *busreadthread(void *ignore) {
 }
 */
 
+// offset of source and destination address in Ethernet
+#define ETHEROFF 12
+
+#define MASK(P, M, S) ntohs((*((int*) (P)) & (M)) >> (S))
+#define CMASK(P, M, S) ((*((char*) (P)) & (M)) >> (S))
+#define OFFSET(P, N) (((char*) (P)) + (N))
+
+struct ip_meta {
+    int ipm_hlen;
+    int ipm_protocol;
+};
+
+struct ip_meta get_ip_metadata(void *packet) {
+    struct ip_meta result;
+    char *curptr = OFFSET(packet, ETHEROFF);
+    // getting protocol type at byte 12
+    // return if payload is not IP
+    if (MASK(curptr, 0xFFFF, 0) != 0x0800) {
+        result.ipm_hlen = -1;
+        return result;
+    }
+    curptr += 2;
+    //TODO missing IPv6 support:
+    if (CMASK(curptr, 0xF0, 4) > 4) {
+        result.ipm_hlen = -2;
+        return result;
+    }
+    result.ipm_hlen = ETHEROFF + 2;
+    // retrieve IP header size (bit 4..7)
+    int ip_header_size = CMASK(curptr, 0x0F, 0);
+    // this value is the word count, each word being 32 bits (4 bytes)
+    ip_header_size *= 4;
+    result.ipm_hlen += ip_header_size;
+
+    // skip to protocol field
+    curptr += 9;
+    result.ipm_protocol = CMASK(curptr, 0xFF, 0);
+    return result;
+}
+
 void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
     assert(eventfd == inotify_hdl);
     struct inotify_event iEvent;
@@ -417,12 +457,25 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
             continue;
         }
 
-        void *packet;
+        void *packet = NULL;
         do {
             struct shmif_pkthdr pkthdr = {};
             readbus(thisbus, &packet, &pkthdr);
             if (packet) {
-                // TODO filter frames here
+                // TODO: filter frames here
+                // TODO: check for SYNs
+                // or first contact (UDP) to implement bind
+                // -> hive.c
+                struct ip_meta pktipm = get_ip_metadata(packet);
+                if (pktipm.ipm_hlen > 0) {
+                    ERR("proto %d\n", pktipm.ipm_protocol);
+                    switch (pktipm.ipm_protocol) {
+                        case 6:
+                        case 17:
+                            ERR("Source Port: %i\n",
+                                    MASK(OFFSET(packet, pktipm.ipm_hlen), 0xFFFF, 0));
+                    }
+                }
                 write(tapfd, packet, pkthdr.sp_len);
             }
         } while(packet);

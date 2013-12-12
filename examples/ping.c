@@ -107,7 +107,7 @@ int main(int argc, char *argv[]) {
     }
 
     char const *srv_address = "10.93.48.2";
-    short const portnum = 26417;
+    short const portnum = 26420;
     err("Connecting to %s:%d\n", srv_address, portnum);
     struct sockaddr_in sin = {
         .sin_family = AF_INET,

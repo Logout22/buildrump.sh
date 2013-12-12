@@ -7,4 +7,4 @@ cc -g -Wall -O0 swarm.c $SHMIFD/shmif_busops.c \
        `pkg-config --libs glib-2.0` `pkg-config --libs libevent` -lrt \
        || exit 1
 #-L$RD/lib -Wl,-R$RD/lib -Wl,--no-as-needed -lrumpnet_shmif -lrumpnet_config -lrumpdev_bpf -lrumpnet_netinet -lrumpnet_net -lrumpnet -lrump
-c99 -g -Wall -O0 pong.c -o pong
+cc -g -Wall -O0 pong.c -o pong
