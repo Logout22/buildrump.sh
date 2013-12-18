@@ -43,6 +43,7 @@
 #include <glib.h>
 
 #include "common.h"
+#include "hive.h"
 #include "shmifvar.h"
 
 #define ERR(...) { \
@@ -405,68 +406,6 @@ void *busreadthread(void *ignore) {
 }
 */
 
-// offset of source and destination address in Ethernet
-#define ETHEROFF 12
-
-#define MASK(P, M, S) ntohs((*((int16_t*) (P)) & (M)) >> (S))
-#define CMASK(P, M, S) ((*((int8_t*) (P)) & (M)) >> (S))
-#define OFFSET(P, N) (((int8_t*) (P)) + (N))
-
-struct ip_meta {
-    int ipm_hlen;
-    int ipm_protocol;
-};
-
-struct ip_meta get_ip_metadata(void *packet) {
-    struct ip_meta result;
-    int8_t *curptr = OFFSET(packet, ETHEROFF);
-    // getting protocol type at byte 12
-    // return if payload is not IP
-    if (MASK(curptr, 0xFFFF, 0) != 0x0800) {
-        result.ipm_hlen = -1;
-        return result;
-    }
-    curptr += 2;
-    //TODO missing IPv6 support:
-    if (CMASK(curptr, 0xF0, 4) > 4) {
-        result.ipm_hlen = -2;
-        return result;
-    }
-    result.ipm_hlen = ETHEROFF + 2;
-    // retrieve IP header size (bit 4..7)
-    int ip_header_size = CMASK(curptr, 0x0F, 0);
-    // this value is the word count, each word being 32 bits (4 bytes)
-    ip_header_size *= 4;
-    result.ipm_hlen += ip_header_size;
-
-    // skip to protocol field
-    curptr += 9;
-    result.ipm_protocol = CMASK(curptr, 0xFF, 0);
-    return result;
-}
-
-struct conn_desc {
-    short cd_source_port;
-    short cd_dest_port;
-    short cd_flags;
-};
-
-struct conn_desc get_conn_metadata(void *packet, bool is_tcp) {
-    // get the TCP/UDP ports to identify the connection
-    // this frame belongs to
-    struct conn_desc res;
-    int8_t *curptr = (int8_t*) packet;
-    res.cd_source_port = MASK(curptr, 0xFFFF, 0);
-    curptr += 2;
-    res.cd_dest_port = MASK(curptr, 0xFFFF, 0);
-    if (is_tcp) {
-        // skip seq/ack number
-        curptr += 8;
-        res.cd_flags = MASK(curptr, 0x0FFF, 0);
-    }
-    return res;
-}
-
 void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
     assert(eventfd == inotify_hdl);
     struct inotify_event iEvent;
@@ -484,35 +423,13 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
             struct shmif_pkthdr pkthdr = {};
             readbus(thisbus, &packet, &pkthdr);
             if (packet) {
-                // TODO: filter frames here
-                // TODO: check for SYNs
-                // or first contact (UDP) to implement bind
-                // -> hive.c
-                struct ip_meta pktipm = get_ip_metadata(packet);
-                int pass = DROP_FRAME;
-                //TODO handle non-IP frames (esp. ARP!)
-                if (pktipm.ipm_hlen > 0) {
-                    bool is_tcp = false;
-                    switch (pktipm.ipm_protocol) {
-                        case 6:
-                            is_tcp = true;
-                            // fall through:
-                        case 17:
-                            int8_t *tcp_frame = packet + pktipm.ipm_hlen;
-                            struct conn_desc pktcd = get_conn_metadata(
-                                    tcp_frame, is_tcp);
-                            pass = pass_for_port(
-                                    pktcd.cd_source_port,
-                                    pktcd.cd_dest_port);
-                            ERR("Source Port: %i\n",
-                                    MASK(tcp_frame, 0xFFFF, 0));
-                    }
-                }
-                if (pass == PACKET_TO_TAP) {
+                int pass = pass_for_frame(packet, iEvent.wd, true);
+                if (pass == PACKET_TO_ALL) {
                     write(tapfd, packet, pkthdr.sp_len);
-                } else {
+                } else if (pass != DROP_FRAME) {
                     struct tmpbus *destbus = (struct tmpbus*)
                         g_hash_table_lookup(busses, GINT_TO_POINTER(pass));
+                    assert(destbus);
                     writebus(destbus, packet, pkthdr.sp_len);
                 }
             }
@@ -546,16 +463,24 @@ void handle_tapread(evutil_socket_t sockfd, short events, void *ignore) {
     int8_t readbuf[bufsize];
     ssize_t pktlen;
     while ((pktlen = read(tapfd, readbuf, bufsize)) > 0) {
-        // TODO filter dest buses here
-        GHashTableIter it;
-        gpointer key, value;
-        for(g_hash_table_iter_init(&it, busses);
-                g_hash_table_iter_next(&it, &key, &value);
-                ) {
-            struct tmpbus *thisbus = (struct tmpbus*) value;
+        int pass = pass_for_frame(readbuf, PACKET_TO_ALL, false);
+        if (pass == PACKET_TO_ALL) {
+            // in this context, PACKET_TO_ALL means bus broadcast
+            GHashTableIter it;
+            gpointer key, value;
+            for(g_hash_table_iter_init(&it, busses);
+                    g_hash_table_iter_next(&it, &key, &value);
+                    ) {
+                struct tmpbus *thisbus = (struct tmpbus*) value;
 
-            // TODO filter frames here
-            writebus((struct tmpbus*) thisbus,
+                writebus((struct tmpbus*) thisbus,
+                        readbuf, pktlen);
+            }
+        } else if (pass != DROP_FRAME) {
+            struct tmpbus *destbus = (struct tmpbus*)
+                g_hash_table_lookup(busses, GINT_TO_POINTER(pass));
+            assert(destbus);
+            writebus((struct tmpbus*) destbus,
                     readbuf, pktlen);
         }
     }
@@ -636,6 +561,7 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
     assert(newbus->tmpbus_lock != SEM_FAILED);
 
     ERR("Add new event\n");
+    //TODO: Notification when a processes closes the file?
     int new_wd = inotify_add_watch(
             inotify_hdl, newbus->tmpbus_name, IN_MODIFY);
     if (new_wd < 0) {
@@ -667,6 +593,8 @@ int main(int argc, char *argv[]) {
     };
     sigaction(SIGINT, &sigact, NULL);
     sigaction(SIGTERM, &sigact, NULL);
+
+    init_hive();
 
     //can eventually be disabled
     event_enable_debug_mode();
