@@ -36,8 +36,11 @@ die(int e, const char *msg)
     exit(e);
 }
 
+int tcpsock = -1;
+
 void __attribute__((__noreturn__))
 cleanup(int signum) {
+    if (tcpsock >= 0) rump_sys_close(tcpsock);
     die(signum, NULL);
 }
 
@@ -95,13 +98,12 @@ int main(int argc, char *argv[]) {
     err("Creating Bus\n");
     rump_pub_shmif_create(rbuf, 0);
 
-    char const *ip_address = "10.93.48.50";
-    err("Setting IP address %s\n", ip_address);
-    rump_pub_netconfig_ipv4_ifaddr("shmif0", ip_address, "255.255.255.0");
+    err("Setting IP address %s\n", IP_ADDRESS);
+    rump_pub_netconfig_ipv4_ifaddr("shmif0", IP_ADDRESS, "255.255.255.0");
     rump_pub_netconfig_ifup("shmif0");
 
     err("Creating Socket\n");
-    int tcpsock = rump_sys_socket(PF_INET, SOCK_STREAM, 0);
+    tcpsock = rump_sys_socket(PF_INET, SOCK_STREAM, 0);
     if (tcpsock <= 0) {
         die(errno, "socket");
     }

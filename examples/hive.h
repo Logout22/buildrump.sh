@@ -8,7 +8,9 @@
 #include <stdbool.h>
 
 void init_hive();
-int pass_for_port(int,short,short,bool);
+void shutdown_hive();
+int pass_for_port(int,short,short,bool,bool);
 int pass_for_frame(void*,int,bool);
+void remove_ports_for_watch(int);
 
 #endif //__HIVE_H__

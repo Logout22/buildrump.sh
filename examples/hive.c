@@ -1,32 +1,48 @@
 #include "common.h"
 #include "hive.h"
 
+#include <stdio.h>
 #include <glib.h>
 #include <inttypes.h>
 #include <arpa/inet.h>
 
+#define ERR(...) { \
+    fprintf(stderr, "hive: "); \
+    fprintf(stderr, __VA_ARGS__); \
+}
+
 static GHashTable *hive_outgoing, *hive_incoming;
+static in_addr_t ip_address_numeric;
 
 void init_hive() {
     hive_outgoing = g_hash_table_new(NULL, NULL);
     hive_incoming = g_hash_table_new(NULL, NULL);
+    ip_address_numeric = inet_addr(IP_ADDRESS);
+}
+
+void shutdown_hive() {
+    g_hash_table_unref(hive_incoming);
+    g_hash_table_unref(hive_outgoing);
 }
 
 // offset of source and destination address in Ethernet
 #define ETHEROFF 12
 
-#define MASK(P, M, S) ntohs((*((int16_t*) (P)) & (M)) >> (S))
-#define CMASK(P, M, S) ((*((int8_t*) (P)) & (M)) >> (S))
-#define OFFSET(P, N) (((int8_t*) (P)) + (N))
+#define LMASK(P, M, S) ((*((uint32_t*) (P)) & (M)) >> (S))
+#define MASK(P, M, S) ntohs((*((uint16_t*) (P)) & (M)) >> (S))
+#define CMASK(P, M, S) ((*((uint8_t*) (P)) & (M)) >> (S))
+#define OFFSET(P, N) (((uint8_t*) (P)) + (N))
 
 struct ip_meta {
     int ipm_hlen;
     int ipm_protocol;
+    uint32_t ipm_sender;
+    uint32_t ipm_receiver;
 };
 
 struct ip_meta get_ip_metadata(void *packet) {
     struct ip_meta result;
-    int8_t *curptr = OFFSET(packet, ETHEROFF);
+    uint8_t *curptr = OFFSET(packet, ETHEROFF);
     // getting protocol type at byte 12
     // return if payload is not IP
     if (MASK(curptr, 0xFFFF, 0) != 0x0800) {
@@ -49,20 +65,26 @@ struct ip_meta get_ip_metadata(void *packet) {
     // skip to protocol field
     curptr += 9;
     result.ipm_protocol = CMASK(curptr, 0xFF, 0);
+
+    // skip to addresses
+    curptr += 3;
+    result.ipm_sender = LMASK(curptr, 0xFFFFFFFF, 0);
+    curptr += 4;
+    result.ipm_receiver = LMASK(curptr, 0xFFFFFFFF, 0);
     return result;
 }
 
 struct conn_desc {
-    short cd_source_port;
-    short cd_dest_port;
-    short cd_flags;
+    uint16_t cd_source_port;
+    uint16_t cd_dest_port;
+    uint16_t cd_flags;
 };
 
 struct conn_desc get_conn_metadata(void *packet, bool is_tcp) {
     // get the TCP/UDP ports to identify the connection
     // this frame belongs to
     struct conn_desc res;
-    int8_t *curptr = (int8_t*) packet;
+    uint8_t *curptr = (uint8_t*) packet;
     res.cd_source_port = MASK(curptr, 0xFFFF, 0);
     curptr += 2;
     res.cd_dest_port = MASK(curptr, 0xFFFF, 0);
@@ -76,32 +98,40 @@ struct conn_desc get_conn_metadata(void *packet, bool is_tcp) {
 
 int pass_for_port(int srcbus_id,
         short source_port, short dest_port,
-        bool outgoing) {
+        bool outgoing, bool is_tcp) {
     gpointer in_key, out_key, orig_key, value;
     GHashTable *in_table, *out_table;
+    ERR("outgoing: %s\n", (outgoing ? "true" : "false"));
     if (outgoing) {
         in_table = hive_incoming;
         out_table = hive_outgoing;
-        in_key = GINT_TO_POINTER(dest_port);
-        out_key = GINT_TO_POINTER(source_port);
+        in_key = GINT_TO_POINTER(((glong) dest_port) & 0xFFFF);
+        out_key = GINT_TO_POINTER(((glong) source_port) & 0xFFFF);
     } else {
         in_table = hive_outgoing;
         out_table = hive_incoming;
-        in_key = GINT_TO_POINTER(source_port);
-        out_key = GINT_TO_POINTER(dest_port);
+        in_key = GINT_TO_POINTER(((glong) source_port) & 0xFFFF);
+        out_key = GINT_TO_POINTER(((glong) dest_port) & 0xFFFF);
     }
+#if 0
     if (!g_hash_table_lookup_extended(out_table, out_key,
-            &orig_key, &value)) {
+                &orig_key, &value)) {
         // this connection is unknown -- allocate it
-        g_hash_table_insert(out_table, out_key, GINT_TO_POINTER(srcbus_id));
+        g_hash_table_insert(
+                out_table, out_key, GINT_TO_POINTER(srcbus_id));
+        ERR("Inserted bus %d for %d\n",
+                srcbus_id, GPOINTER_TO_INT(out_key));
     } else {
         if (srcbus_id != GPOINTER_TO_INT(value)) {
+            ERR("Denied bus %d on %d\n",
+                    srcbus_id, GPOINTER_TO_INT(out_key));
             // this bus is not allowed to send this frame, so drop it
             // TODO: a separate socket should send an immediate feedback
             // to a failing network client
             return DROP_FRAME;
         }
     }
+#endif
 
     // check if we need to feed it back to one of the
     // busses, otherwise send it out
@@ -109,13 +139,18 @@ int pass_for_port(int srcbus_id,
                 in_table, in_key, &orig_key, &value)) {
         int targetbus_id = GPOINTER_TO_INT(value);
         if (targetbus_id == srcbus_id) {
+            ERR("Dropped recursive frame from port %d\n",
+                    GPOINTER_TO_INT(in_key));
             // avoids recursion due to packets written by Swarm
             // generating inotify wakeup calls
             return DROP_FRAME;
         } else {
+            ERR("Packet to bus %d from port %d\n",
+                    GPOINTER_TO_INT(value), GPOINTER_TO_INT(in_key));
             return GPOINTER_TO_INT(value);
         }
     } else {
+        ERR("Broadcasting from port %d\n", GPOINTER_TO_INT(in_key));
         return PACKET_TO_ALL;
     }
 }
@@ -127,22 +162,44 @@ int pass_for_frame(void *frame, int srcbus_id, bool outgoing) {
     int pass = PACKET_TO_ALL;
     //TODO handle non-IP frames (esp. ARP!)
     if (pktipm.ipm_hlen > 0) {
-        bool is_tcp = false;
-        int8_t *tcp_frame = NULL;
-        switch (pktipm.ipm_protocol) {
-            case 6:
-                is_tcp = true;
-                // fall through:
-            case 17:
-                tcp_frame = OFFSET(frame, pktipm.ipm_hlen);
-                struct conn_desc pktcd = get_conn_metadata(
-                        tcp_frame, is_tcp);
-                pass = pass_for_port(
-                        srcbus_id,
-                        pktcd.cd_source_port,
-                        pktcd.cd_dest_port,
-                        outgoing);
+        // TODO missing IPv6 support
+        if (CMASK(&pktipm.ipm_receiver, 0xFF, 0) == 127 ||
+                ((in_addr_t)pktipm.ipm_receiver) == ip_address_numeric) {
+            // TODO add broadcast/multicast/... addresses
+            bool is_tcp = false;
+            uint8_t *tcp_frame = NULL;
+            switch (pktipm.ipm_protocol) {
+                case 6:
+                    is_tcp = true;
+                    // fall through:
+                case 17:
+                    tcp_frame = OFFSET(frame, pktipm.ipm_hlen);
+                    struct conn_desc pktcd = get_conn_metadata(
+                            tcp_frame, is_tcp);
+                    pass = pass_for_port(
+                            srcbus_id,
+                            pktcd.cd_source_port,
+                            pktcd.cd_dest_port,
+                            outgoing, is_tcp);
+            }
+        } else {
+            pass = PACKET_TO_ALL;
         }
     }
     return pass;
+}
+
+gboolean rm_watch(gpointer key, gpointer value, gpointer watch) {
+    if (value == watch) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+void remove_ports_for_watch(int watchfd) {
+    g_hash_table_foreach_remove(
+            hive_outgoing, rm_watch, GINT_TO_POINTER(watchfd));
+    g_hash_table_foreach_remove(
+            hive_incoming, rm_watch, GINT_TO_POINTER(watchfd));
 }

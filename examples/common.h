@@ -4,6 +4,8 @@
 
 #define USOCK_VERSION 1
 
+#define IP_ADDRESS "10.93.48.100"
+
 struct unxsock_msg {
     int um_ver;
     int um_msgid;

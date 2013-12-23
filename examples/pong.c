@@ -73,12 +73,13 @@ int main(int argc, char *argv[]) {
         char rbuf[bufsize + 1];
         rbuf[bufsize] = 0;
         //ERR("Reading at most %d bytes\n", bufsize);
-        int i;
-        for(i = 0; i < 4; i++) {
-            res = read(rcvsock, rbuf, bufsize);
+        //int i;
+        while((res = read(rcvsock, rbuf, bufsize)) > 0) {
+            /*
             if (res <= 0) {
                 die(errno, "read");
             }
+            */
             ERR("rcvd %s\n", rbuf);
             sleep(1);
             char const wbuf[] = "Pong.\0";

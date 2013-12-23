@@ -73,13 +73,12 @@ struct tmpbus {
     sem_t *tmpbus_lock;
 };
 
-int unix_socket = 0, tapfd = 0, inotify_hdl = 0;
-struct event *unix_socket_listener_event = NULL,
+static int unix_socket = 0, tapfd = 0, inotify_hdl = 0;
+static struct event *unix_socket_listener_event = NULL,
              *tap_listener_event = NULL,
              *inotify_listener_event = NULL;
-GHashTable *busses = NULL;
-bool terminate = false;
-struct event_base *ev_base;
+static GHashTable *busses = NULL;
+static struct event_base *ev_base;
 
 static void __attribute__((__noreturn__))
 die(int e, const char *msg)
@@ -122,14 +121,22 @@ void deallocate_bus(gpointer dataptr) {
     }
     if (busptr->tmpbus_hdl) {
         close(busptr->tmpbus_hdl);
+        // should be left for debugging purposes:
         unlink(busptr->tmpbus_name);
     }
     free(busptr->tmpbus_position);
     free(busptr);
 }
 
+void deallocate_watch(gpointer arg) {
+    int watchfd = GPOINTER_TO_INT(arg);
+    // notify Hive
+    remove_ports_for_watch(watchfd);
+    inotify_rm_watch(inotify_hdl, watchfd);
+}
+
 void cleanup() {
-    ERR("Exiting\n");
+    ERR("Screw you guys, I'm going home!\n");
     g_hash_table_unref(busses);
     if (unix_socket_listener_event) {
         event_free(unix_socket_listener_event);
@@ -147,6 +154,7 @@ void cleanup() {
     if (ev_base) {
         event_base_free(ev_base);
     }
+    shutdown_hive();
 }
 
 int tun_alloc(char *dev)
@@ -176,41 +184,7 @@ int tun_alloc(char *dev)
   return fd;
 }
 
-int initbus(struct shmif_mem **hdrp, int busfd, pid_t caller_pid) {
-    if (ftruncate(busfd, BUSMEM_SIZE) != 0) {
-        ERR("ftruncate failed\n");
-        return errno;
-    }
-
-    struct shmif_mem *hdr = mmap(NULL, BUSMEM_SIZE,
-            PROT_READ|PROT_WRITE, MAP_FILE|MAP_SHARED,
-            busfd, 0);
-    if (hdr == MAP_FAILED) {
-        ERR("map failed\n");
-        return errno;
-    }
-
-	sem_t *shmif_lockall_sem = sem_open("rumpuser_shmif_lockall",
-			O_CREAT, 0644, 1);
-	assert(shmif_lockall_sem != SEM_FAILED);
-	int result;
-	do {
-		result = sem_wait(shmif_lockall_sem);
-	} while (result == EINTR);
-	assert(result == 0);
-
-	if (hdr->shm_magic == 0) {
-        hdr->shm_magic = SHMIF_MAGIC;
-        hdr->shm_first = BUSMEM_DATASIZE;
-        hdr->shm_lock = caller_pid;
-    }
-
-	assert(sem_post(shmif_lockall_sem) == 0);
-	sem_close(shmif_lockall_sem);
-
-    *hdrp = hdr;
-    return 0;
-}
+#define LOCK_LOCKED	1
 
 static void
 dowakeup(int busfd)
@@ -234,6 +208,32 @@ static void
 shmif_unlockbus(sem_t *to_unlock)
 {
 	assert(sem_post(to_unlock) == 0);
+}
+
+int initbus(struct tmpbus *newbus) {
+    if (ftruncate(newbus->tmpbus_hdl, BUSMEM_SIZE) != 0) {
+        ERR("ftruncate failed\n");
+        return errno;
+    }
+
+    struct shmif_mem *hdr = mmap(NULL, BUSMEM_SIZE,
+            PROT_READ|PROT_WRITE, MAP_FILE|MAP_SHARED,
+            newbus->tmpbus_hdl, 0);
+    if (hdr == MAP_FAILED) {
+        ERR("map failed\n");
+        return errno;
+    }
+
+    shmif_lockbus(newbus->tmpbus_lock);
+	if (hdr->shm_magic == 0) {
+        hdr->shm_magic = SHMIF_MAGIC;
+        hdr->shm_first = BUSMEM_DATASIZE;
+        hdr->shm_lock = LOCK_LOCKED;
+    }
+    shmif_unlockbus(newbus->tmpbus_lock);
+
+    newbus->tmpbus_header = hdr;
+    return 0;
 }
 
 static void
@@ -391,30 +391,23 @@ readbus(struct tmpbus *thisbus,
     }
 }
 
-/*
-void *busreadthread(void *ignore) {
-    void *packet;
-    struct shmif_pkthdr pkthdr = {};
-    while (!terminate) {
-        readbus(tmpbus_header, &tmpbus_position,
-                &packet, &pkthdr);
-        if (packet) {
-            write(tapfd, packet, pkthdr.sp_len);
-        }
-    }
-    return NULL;
-}
-*/
-
 void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
     assert(eventfd == inotify_hdl);
     struct inotify_event iEvent;
 
     while (read(inotify_hdl, &iEvent, sizeof(iEvent)) > 0) {
+        if (iEvent.mask & IN_CLOSE_WRITE) {
+            g_hash_table_remove(busses, GINT_TO_POINTER(iEvent.wd));
+            continue;
+        }
+
         struct tmpbus *thisbus = (struct tmpbus *) g_hash_table_lookup(
                 busses, GINT_TO_POINTER(iEvent.wd));
         if (thisbus == NULL) {
-            ERR("Notified for wrong watch (FD #%d)!\n", iEvent.wd);
+            if (!(iEvent.mask & IN_IGNORED)) {
+                // this is no notification for a deleted watch
+                ERR("Notified for wrong watch (FD #%d)!\n", iEvent.wd);
+            }
             continue;
         }
 
@@ -437,25 +430,6 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
     }
 }
 
-/*
-void *buswritethread(void *ignore) {
-    int const bufsize = 4000;
-    char readbuf[bufsize];
-    ssize_t pktlen;
-    while (!terminate) {
-        pktlen = read(tapfd, readbuf, bufsize);
-        if (pktlen < 0) {
-            //error - quit
-            return NULL;
-        }
-        if (pktlen > 0) {
-            writebus(tmpbus_hdl, tmpbus_header,
-                    readbuf, pktlen);
-        }
-    }
-    return NULL;
-}
-*/
 void handle_tapread(evutil_socket_t sockfd, short events, void *ignore) {
     assert(sockfd == tapfd);
 
@@ -503,6 +477,10 @@ void readstruct(int fd, void* structp, size_t structsize) {
     assert(bytes_to_read == 0);
 }
 
+#define PREAMBLE "rumpuser_shmif_lock_"
+/* includes terminating 0: */
+#define PREAMBLE_LEN 21
+
 void unix_accept(evutil_socket_t sock, short events, void *ignore) {
     int fd = accept(sock, NULL, 0);
     if (fd <= 0) {
@@ -545,41 +523,36 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
         deallocate_bus(newbus);
         die(errno, "open tmpbus");
     }
-    if (initbus(&newbus->tmpbus_header,
-                newbus->tmpbus_hdl,
-                caller_pid) != 0) {
+
+    ERR("Creating semaphore\n");
+	size_t sem_name_len = strlen(newbus->tmpbus_name) + PREAMBLE_LEN;
+	/*
+	 * 2000 characters should be enough for everyone
+	 * (simply adjust if not sufficient):
+	 */
+	assert(sem_name_len < 2022);
+	char *shmif_sem_name = malloc(sem_name_len);
+	assert(shmif_sem_name);
+	sprintf(shmif_sem_name, "%s%s", PREAMBLE, newbus->tmpbus_name);
+
+	newbus->tmpbus_lock = sem_open(shmif_sem_name, O_CREAT, 0644, 1);
+    free(shmif_sem_name);
+	assert(newbus->tmpbus_lock != SEM_FAILED);
+
+    if (initbus(newbus) != 0) {
         deallocate_bus(newbus);
         die(errno, "init tmpbus");
     }
 
-    ERR("Creating semaphore\n");
-    int const sem_name_len = 30;
-    char shmif_sem_name[sem_name_len];
-    snprintf(shmif_sem_name, sem_name_len,
-            "rumpuser_shmif_lock_%i", caller_pid);
-    newbus->tmpbus_lock = sem_open(shmif_sem_name, O_CREAT, 0644, 1);
-    assert(newbus->tmpbus_lock != SEM_FAILED);
-
     ERR("Add new event\n");
-    //TODO: Notification when a processes closes the file?
     int new_wd = inotify_add_watch(
-            inotify_hdl, newbus->tmpbus_name, IN_MODIFY);
+            inotify_hdl, newbus->tmpbus_name, IN_MODIFY | IN_CLOSE_WRITE);
     if (new_wd < 0) {
         deallocate_bus(newbus);
         die(errno, "inotify watch");
     }
     g_hash_table_insert(
             busses, GINT_TO_POINTER(new_wd), newbus);
-
-    /*
-    newbus->tmpbus_event = event_new(
-        ev_base, newbus->tmpbus_hdl, EV_READ|EV_PERSIST,
-        handle_busread, newbus);
-    if (newbus->tmpbus_event == NULL) {
-        die(0, "event_new");
-    }
-    event_add(newbus->tmpbus_event, NULL);
-    */
 
     // now answer the client with the bus file name
     write(fd, newbus->tmpbus_name, sizeof(newbus->tmpbus_name));
@@ -599,7 +572,8 @@ int main(int argc, char *argv[]) {
     //can eventually be disabled
     event_enable_debug_mode();
 
-    busses = g_hash_table_new_full(NULL, NULL, NULL, deallocate_bus);
+    busses = g_hash_table_new_full(NULL, NULL,
+            deallocate_watch, deallocate_bus);
 
     ev_base = event_base_new();
     if (ev_base == NULL) {
@@ -672,18 +646,6 @@ int main(int argc, char *argv[]) {
     ERR("Waiting for a client to send the bus file name to\n");
     event_base_dispatch(ev_base);
 
-    /*
-    ERR("Creating send/receive threads\n");
-    pthread_t readthread, writethread;
-    pthread_create(&readthread, NULL, busreadthread, NULL);
-    pthread_create(&writethread, NULL, buswritethread, NULL);
-
-    sleep(120);
-
-    terminate = true;
-    pthread_join(writethread, NULL);
-    pthread_join(readthread, NULL);
-    */
     die(0, NULL);
 
 }
