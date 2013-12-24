@@ -2,8 +2,10 @@
 #define __HIVE_H__
 
 // Pass constants
-#define DROP_FRAME -2
-#define PACKET_TO_ALL -1
+#define INVALID_BUS -4
+#define DROP_FRAME -3
+#define FRAME_TO_TAP -2
+#define FRAME_TO_ALL -1
 
 #include <stdbool.h>
 

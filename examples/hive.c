@@ -15,14 +15,14 @@ static GHashTable *hive_outgoing, *hive_incoming;
 static in_addr_t ip_address_numeric;
 
 void init_hive() {
-    hive_outgoing = g_hash_table_new(NULL, NULL);
+//    hive_outgoing = g_hash_table_new(NULL, NULL);
     hive_incoming = g_hash_table_new(NULL, NULL);
     ip_address_numeric = inet_addr(IP_ADDRESS);
 }
 
 void shutdown_hive() {
     g_hash_table_unref(hive_incoming);
-    g_hash_table_unref(hive_outgoing);
+//    g_hash_table_unref(hive_outgoing);
 }
 
 // offset of source and destination address in Ethernet
@@ -40,7 +40,7 @@ struct ip_meta {
     uint32_t ipm_receiver;
 };
 
-struct ip_meta get_ip_metadata(void *packet) {
+static struct ip_meta get_ip_metadata(void *packet) {
     struct ip_meta result;
     uint8_t *curptr = OFFSET(packet, ETHEROFF);
     // getting protocol type at byte 12
@@ -80,7 +80,7 @@ struct conn_desc {
     uint16_t cd_flags;
 };
 
-struct conn_desc get_conn_metadata(void *packet, bool is_tcp) {
+static struct conn_desc get_conn_metadata(void *packet, bool is_tcp) {
     // get the TCP/UDP ports to identify the connection
     // this frame belongs to
     struct conn_desc res;
@@ -96,94 +96,112 @@ struct conn_desc get_conn_metadata(void *packet, bool is_tcp) {
     return res;
 }
 
-int pass_for_port(int srcbus_id,
+static int lookup_dest_bus(short dest_port) {
+    int pass;
+    gpointer key, value;
+    int i_lookup = dest_port & 0xFFFF;
+    gpointer lookup = GINT_TO_POINTER(i_lookup);
+    if (!g_hash_table_lookup_extended(
+                hive_incoming, lookup, &key, &value)) {
+        // do not know target bus yet, wait for outgoing
+        pass = FRAME_TO_ALL;
+    } else {
+        pass = GPOINTER_TO_INT(value);
+    }
+
+    return pass;
+}
+
+static bool connection_ok(int srcbus_id, short source_port) {
+    gpointer key, value;
+    int i_lookup = source_port & 0xFFFF;
+    gpointer lookup = GINT_TO_POINTER(i_lookup);
+    if (!g_hash_table_lookup_extended(
+            hive_incoming, lookup, &key, &value)) {
+        // register connection
+        g_hash_table_insert(
+            hive_incoming, lookup, GINT_TO_POINTER(srcbus_id));
+    } else if (srcbus_id != GPOINTER_TO_INT(value)) {
+        // connection not registered
+        return false;
+    }
+    return true;
+}
+
+static int pass_for_port_local(int srcbus_id,
         short source_port, short dest_port,
         bool outgoing, bool is_tcp) {
-    gpointer in_key, out_key, orig_key, value;
-    GHashTable *in_table, *out_table;
-    ERR("outgoing: %s\n", (outgoing ? "true" : "false"));
-    if (outgoing) {
-        in_table = hive_incoming;
-        out_table = hive_outgoing;
-        in_key = GINT_TO_POINTER(((glong) dest_port) & 0xFFFF);
-        out_key = GINT_TO_POINTER(((glong) source_port) & 0xFFFF);
-    } else {
-        in_table = hive_outgoing;
-        out_table = hive_incoming;
-        in_key = GINT_TO_POINTER(((glong) source_port) & 0xFFFF);
-        out_key = GINT_TO_POINTER(((glong) dest_port) & 0xFFFF);
-    }
-#if 0
-    if (!g_hash_table_lookup_extended(out_table, out_key,
-                &orig_key, &value)) {
-        // this connection is unknown -- allocate it
-        g_hash_table_insert(
-                out_table, out_key, GINT_TO_POINTER(srcbus_id));
-        ERR("Inserted bus %d for %d\n",
-                srcbus_id, GPOINTER_TO_INT(out_key));
-    } else {
-        if (srcbus_id != GPOINTER_TO_INT(value)) {
-            ERR("Denied bus %d on %d\n",
-                    srcbus_id, GPOINTER_TO_INT(out_key));
-            // this bus is not allowed to send this frame, so drop it
-            // TODO: a separate socket should send an immediate feedback
-            // to a failing network client
-            return DROP_FRAME;
-        }
-    }
-#endif
+    int pass = DROP_FRAME;
+    gpointer key, value, lookup;
 
-    // check if we need to feed it back to one of the
-    // busses, otherwise send it out
-    if(g_hash_table_lookup_extended(
-                in_table, in_key, &orig_key, &value)) {
-        int targetbus_id = GPOINTER_TO_INT(value);
-        if (targetbus_id == srcbus_id) {
-            ERR("Dropped recursive frame from port %d\n",
-                    GPOINTER_TO_INT(in_key));
-            // avoids recursion due to packets written by Swarm
-            // generating inotify wakeup calls
-            return DROP_FRAME;
-        } else {
-            ERR("Packet to bus %d from port %d\n",
-                    GPOINTER_TO_INT(value), GPOINTER_TO_INT(in_key));
-            return GPOINTER_TO_INT(value);
+    //FIXME insert hive_desc
+    if (!is_tcp) {
+        pass = lookup_dest_bus(dest_port);
+
+        if (outgoing) {
+            //FIXME table for UDP different from table for TCP
+            // register connection if necessary
+            connection_ok(srcbus_id, source_port);
         }
-    } else {
-        ERR("Broadcasting from port %d\n", GPOINTER_TO_INT(in_key));
-        return PACKET_TO_ALL;
+    } else if (!outgoing || connection_ok(srcbus_id, source_port)) {
+        pass = lookup_dest_bus(dest_port);
     }
+    return pass;
+}
+
+static int pass_for_port_remote(int srcbus_id,
+        short source_port,
+        bool outgoing, bool is_tcp) {
+    int pass = DROP_FRAME;
+    gpointer key, value;
+    /* This function only handles outgoing packets
+     * because we are not supposed to process packets
+     * that belong to other hosts.
+     *
+     * If they are outgoing, we need to make sure that they are
+     * either UDP packets, which are not connection-based,
+     * or that their connection data is valid, i.e. the packet
+     * starts a new connection or continues an old one.
+     */
+    if (outgoing &&
+            (!is_tcp || connection_ok(srcbus_id, source_port))) {
+        pass = FRAME_TO_TAP;
+    }
+    return pass;
 }
 
 int pass_for_frame(void *frame, int srcbus_id, bool outgoing) {
     struct ip_meta pktipm = get_ip_metadata(frame);
     // TODO until non-IP frames can be properly handled, we
     // need to pass them on; then we should revert to DROP_FRAME default
-    int pass = PACKET_TO_ALL;
+    int pass = FRAME_TO_ALL;
     //TODO handle non-IP frames (esp. ARP!)
     if (pktipm.ipm_hlen > 0) {
-        // TODO missing IPv6 support
-        if (CMASK(&pktipm.ipm_receiver, 0xFF, 0) == 127 ||
-                ((in_addr_t)pktipm.ipm_receiver) == ip_address_numeric) {
-            // TODO add broadcast/multicast/... addresses
-            bool is_tcp = false;
-            uint8_t *tcp_frame = NULL;
-            switch (pktipm.ipm_protocol) {
-                case 6:
-                    is_tcp = true;
-                    // fall through:
-                case 17:
-                    tcp_frame = OFFSET(frame, pktipm.ipm_hlen);
-                    struct conn_desc pktcd = get_conn_metadata(
-                            tcp_frame, is_tcp);
-                    pass = pass_for_port(
+        bool is_tcp = false;
+        uint8_t *tcp_frame = NULL;
+        switch (pktipm.ipm_protocol) {
+            case 6:
+                is_tcp = true;
+                // fall through:
+            case 17:
+                tcp_frame = OFFSET(frame, pktipm.ipm_hlen);
+                struct conn_desc pktcd = get_conn_metadata(
+                        tcp_frame, is_tcp);
+                // TODO missing IPv6 support
+                if (CMASK(&pktipm.ipm_receiver, 0xFF, 0) == 127 ||
+                    ((in_addr_t)pktipm.ipm_receiver) == ip_address_numeric) {
+                    // TODO add broadcast/multicast/... addresses
+                    pass = pass_for_port_local(
                             srcbus_id,
                             pktcd.cd_source_port,
                             pktcd.cd_dest_port,
                             outgoing, is_tcp);
-            }
-        } else {
-            pass = PACKET_TO_ALL;
+                } else {
+                    pass = pass_for_port_remote(
+                            srcbus_id,
+                            pktcd.cd_source_port,
+                            outgoing, is_tcp);
+                }
         }
     }
     return pass;
@@ -198,8 +216,7 @@ gboolean rm_watch(gpointer key, gpointer value, gpointer watch) {
 }
 
 void remove_ports_for_watch(int watchfd) {
-    g_hash_table_foreach_remove(
-            hive_outgoing, rm_watch, GINT_TO_POINTER(watchfd));
+    // FIXME delete UDP cache entries too
     g_hash_table_foreach_remove(
             hive_incoming, rm_watch, GINT_TO_POINTER(watchfd));
 }

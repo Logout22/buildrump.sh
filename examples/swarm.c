@@ -391,6 +391,18 @@ readbus(struct tmpbus *thisbus,
     }
 }
 
+void send_frame_to_all(void *frame, size_t flen) {
+    GHashTableIter it;
+    gpointer key, value;
+    for(g_hash_table_iter_init(&it, busses);
+            g_hash_table_iter_next(&it, &key, &value);
+       ) {
+        struct tmpbus *thisbus = (struct tmpbus*) value;
+
+        writebus((struct tmpbus*) thisbus, frame, flen);
+    }
+}
+
 void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
     assert(eventfd == inotify_hdl);
     struct inotify_event iEvent;
@@ -417,8 +429,10 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
             readbus(thisbus, &packet, &pkthdr);
             if (packet) {
                 int pass = pass_for_frame(packet, iEvent.wd, true);
-                if (pass == PACKET_TO_ALL) {
+                if (pass == FRAME_TO_TAP) {
                     write(tapfd, packet, pkthdr.sp_len);
+                } else if (pass == FRAME_TO_ALL) {
+                    send_frame_to_all(packet, pkthdr.sp_len);
                 } else if (pass != DROP_FRAME) {
                     struct tmpbus *destbus = (struct tmpbus*)
                         g_hash_table_lookup(busses, GINT_TO_POINTER(pass));
@@ -437,19 +451,9 @@ void handle_tapread(evutil_socket_t sockfd, short events, void *ignore) {
     int8_t readbuf[bufsize];
     ssize_t pktlen;
     while ((pktlen = read(tapfd, readbuf, bufsize)) > 0) {
-        int pass = pass_for_frame(readbuf, PACKET_TO_ALL, false);
-        if (pass == PACKET_TO_ALL) {
-            // in this context, PACKET_TO_ALL means bus broadcast
-            GHashTableIter it;
-            gpointer key, value;
-            for(g_hash_table_iter_init(&it, busses);
-                    g_hash_table_iter_next(&it, &key, &value);
-                    ) {
-                struct tmpbus *thisbus = (struct tmpbus*) value;
-
-                writebus((struct tmpbus*) thisbus,
-                        readbuf, pktlen);
-            }
+        int pass = pass_for_frame(readbuf, INVALID_BUS, false);
+        if (pass == FRAME_TO_ALL) {
+            send_frame_to_all(readbuf, pktlen);
         } else if (pass != DROP_FRAME) {
             struct tmpbus *destbus = (struct tmpbus*)
                 g_hash_table_lookup(busses, GINT_TO_POINTER(pass));
