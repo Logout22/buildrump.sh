@@ -96,7 +96,10 @@ static struct conn_desc get_conn_metadata(void *packet, bool is_tcp) {
     return res;
 }
 
-static int lookup_dest_bus(short dest_port) {
+#define TABLE_TCP 0
+#define TABLE_UDP 1
+
+static int lookup_dest_bus(short dest_port, int table_idx) {
     int pass;
     gpointer key, value;
     int i_lookup = dest_port & 0xFFFF;
@@ -136,13 +139,11 @@ static int pass_for_port_local(int srcbus_id,
 
     //FIXME insert hive_desc
     if (!is_tcp) {
-        pass = lookup_dest_bus(dest_port);
-
-        if (outgoing) {
-            //FIXME table for UDP different from table for TCP
-            // register connection if necessary
-            connection_ok(srcbus_id, source_port);
-        }
+        //FIXME create UDP remote connection cache
+        //as part of GHashTable array (indexes above)
+        //(less overhead than total connection cache,
+        //should cover most use cases)
+        pass = lookup_dest_bus(dest_port, TABLE_UDP);
     } else if (!outgoing || connection_ok(srcbus_id, source_port)) {
         pass = lookup_dest_bus(dest_port);
     }
@@ -163,9 +164,17 @@ static int pass_for_port_remote(int srcbus_id,
      * or that their connection data is valid, i.e. the packet
      * starts a new connection or continues an old one.
      */
-    if (outgoing &&
-            (!is_tcp || connection_ok(srcbus_id, source_port))) {
-        pass = FRAME_TO_TAP;
+    if (outgoing) {
+        if (!is_tcp) {
+            //FIXME table for UDP different from table for TCP
+            //TODO register remote UDP connections only
+            //in UDP cache: (srcbus_id, source_port)
+            // register connection if necessary
+            connection_ok(srcbus_id, source_port);
+            pass = FRAME_TO_TAP;
+        } else if (connection_ok(srcbus_id, source_port)) {
+            pass = FRAME_TO_TAP;
+        }
     }
     return pass;
 }
