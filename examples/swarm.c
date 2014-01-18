@@ -70,7 +70,6 @@ struct tmpbus {
     struct shmif_mem *tmpbus_header;
     struct shmif_handle *tmpbus_position;
     struct event *tmpbus_event;
-    sem_t *tmpbus_lock;
 };
 
 static int unix_socket = 0, tapfd = 0, inotify_hdl = 0;
@@ -112,9 +111,6 @@ void deallocate_bus(gpointer dataptr) {
 
     if (busptr->tmpbus_event) {
         event_free(busptr->tmpbus_event);
-    }
-    if (busptr->tmpbus_lock) {
-        sem_close(busptr->tmpbus_lock);
     }
     if (busptr->tmpbus_header) {
         munmap(busptr->tmpbus_header, BUSMEM_SIZE);
@@ -184,8 +180,6 @@ int tun_alloc(char *dev)
   return fd;
 }
 
-#define LOCK_LOCKED	1
-
 static void
 dowakeup(int busfd)
 {
@@ -193,21 +187,59 @@ dowakeup(int busfd)
     pwrite(busfd, &ver, sizeof(ver), IFMEM_WAKEUP);
 }
 
-static void
-shmif_lockbus(sem_t *to_lock)
-{
-	int result;
+#define LOCK_UNLOCKED	0
+#define LOCK_LOCKED	1
+#define LOCK_COOLDOWN	1001
 
-	do {
-		result = sem_wait(to_lock);
-	} while (result == EINTR);
-	assert(result == 0);
+// man, this sucks in Linux
+uint32_t compare_exchange(uint32_t *addr, uint32_t old, uint32_t new) {
+    uint32_t result;
+    asm("mov %1, %%eax;"
+        "cmpxchg %2, %3;"
+        "mov %%eax, %0"
+        : "=r"(result)
+        : "r"(old), "r"(new), "m"(addr)
+        : "eax");
+    return result;
+}
+
+void mfence() {
+    asm("mfence");
 }
 
 static void
-shmif_unlockbus(sem_t *to_unlock)
+shmif_lockbus(struct shmif_mem *busmem)
 {
-	assert(sem_post(to_unlock) == 0);
+	int i = 0;
+
+	while (compare_exchange(&busmem->shm_lock,
+                LOCK_UNLOCKED, LOCK_LOCKED) == LOCK_LOCKED) {
+		if (++i > LOCK_COOLDOWN) {
+			/* wait 1ms */
+            struct timespec rqt = { .tv_nsec = 1000*1000 };
+            struct timespec rmt;
+            int rv;
+            do {
+                rv = nanosleep(&rqt, &rmt);
+                rqt = rmt;
+            } while (rv == -1 && errno == EINTR);
+
+            // reset cooldown counter
+			i = 0;
+		}
+		continue;
+	}
+    mfence();
+
+    assert(busmem->shm_lock == LOCK_LOCKED);
+}
+
+static void
+shmif_unlockbus(struct shmif_mem *busmem)
+{
+    mfence();
+	assert(compare_exchange(&busmem->shm_lock,
+                LOCK_LOCKED, LOCK_UNLOCKED) == LOCK_LOCKED);
 }
 
 int initbus(struct tmpbus *newbus) {
@@ -224,13 +256,13 @@ int initbus(struct tmpbus *newbus) {
         return errno;
     }
 
-    shmif_lockbus(newbus->tmpbus_lock);
+    shmif_lockbus(newbus->tmpbus_header);
 	if (hdr->shm_magic == 0) {
         hdr->shm_magic = SHMIF_MAGIC;
         hdr->shm_first = BUSMEM_DATASIZE;
-        hdr->shm_lock = LOCK_LOCKED;
+        //hdr->shm_lock = LOCK_LOCKED;
     }
-    shmif_unlockbus(newbus->tmpbus_lock);
+    shmif_unlockbus(newbus->tmpbus_header);
 
     newbus->tmpbus_header = hdr;
     return 0;
@@ -255,7 +287,7 @@ writebus(struct tmpbus *thisbus,
     sp.sp_sec = ts.tv_sec;
     sp.sp_usec = ts.tv_nsec / 1000;
 
-    shmif_lockbus(thisbus->tmpbus_lock);
+    shmif_lockbus(thisbus->tmpbus_header);
     assert(busmem->shm_magic == SHMIF_MAGIC);
     busmem->shm_last = shmif_nextpktoff(busmem, busmem->shm_last);
 
@@ -268,7 +300,7 @@ writebus(struct tmpbus *thisbus,
         busmem->shm_gen++;
         ERR("bus generation now %" PRIu64 "\n", busmem->shm_gen);
     }
-    shmif_unlockbus(thisbus->tmpbus_lock);
+    shmif_unlockbus(thisbus->tmpbus_header);
 
     wrote = true;
 
@@ -329,7 +361,7 @@ readbus(struct tmpbus *thisbus,
     /*ERR("waiting %" PRIu32 "/%" PRIu64 "\n",
         sc->sc_nextpacket, sc->sc_devgen);*/
 
-    shmif_lockbus(thisbus->tmpbus_lock);
+    shmif_lockbus(thisbus->tmpbus_header);
     assert(busmem->shm_magic == SHMIF_MAGIC);
     assert(busmem->shm_gen >= sc->sc_devgen);
 
@@ -337,7 +369,7 @@ readbus(struct tmpbus *thisbus,
     if (sc->sc_devgen == busmem->shm_gen &&
         shmif_nextpktoff(busmem, busmem->shm_last)
          == sc->sc_nextpacket) {
-        shmif_unlockbus(thisbus->tmpbus_lock);
+        shmif_unlockbus(thisbus->tmpbus_header);
         // nothing to read
         *packet = NULL;
         memset(spp, 0, sizeof(struct shmif_pkthdr));
@@ -382,7 +414,7 @@ readbus(struct tmpbus *thisbus,
         spp->sp_len, nextpkt);
 
     sc->sc_nextpacket = nextpkt;
-    shmif_unlockbus(thisbus->tmpbus_lock);
+    shmif_unlockbus(thisbus->tmpbus_header);
 
     if (wrap) {
         sc->sc_devgen++;
@@ -528,6 +560,7 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
         die(errno, "open tmpbus");
     }
 
+#if 0
     ERR("Creating semaphore\n");
 	size_t sem_name_len = strlen(newbus->tmpbus_name) + PREAMBLE_LEN;
 	/*
@@ -542,6 +575,7 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
 	newbus->tmpbus_lock = sem_open(shmif_sem_name, O_CREAT, 0644, 1);
     free(shmif_sem_name);
 	assert(newbus->tmpbus_lock != SEM_FAILED);
+#endif
 
     if (initbus(newbus) != 0) {
         deallocate_bus(newbus);

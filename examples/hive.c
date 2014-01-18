@@ -145,7 +145,8 @@ static int pass_for_port_local(int srcbus_id,
         //should cover most use cases)
         pass = lookup_dest_bus(dest_port, TABLE_UDP);
     } else if (!outgoing || connection_ok(srcbus_id, source_port)) {
-        pass = lookup_dest_bus(dest_port);
+        // FIXME is TABLE_TCP correct?
+        pass = lookup_dest_bus(dest_port, TABLE_TCP);
     }
     return pass;
 }
