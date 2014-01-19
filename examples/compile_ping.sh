@@ -6,6 +6,5 @@ cc -g -Wall -O3 swarm.c $SHMIFD/shmif_busops.c hive.c \
        -o swarm -I$RD/include -I$SHMIFD -I$ATMDIR/include -L$ATMDIR/lib \
        `pkg-config --cflags glib-2.0` `pkg-config --cflags libevent` \
        `pkg-config --libs glib-2.0` `pkg-config --libs libevent` -lrt \
-       -latomic_ops \
        || exit 1
 cc -g -Wall -O3 pong.c -o pong

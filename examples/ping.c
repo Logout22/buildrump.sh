@@ -2,7 +2,6 @@
 #include <sys/cdefs.h>
 #include <sys/stat.h>
 
-#include <assert.h>
 #include <err.h>
 #include <errno.h>
 #include <netdb.h>
@@ -60,7 +59,9 @@ int main(int argc, char *argv[]) {
 
     err("Fetching bus name\n");
     int unix_socket = socket(AF_UNIX, SOCK_STREAM, 0);
-    assert(unix_socket);
+    if (!unix_socket) {
+        err("socket() failed");
+    }
 
     struct sockaddr_un sockaddr = {
         .sun_family = AF_UNIX,

@@ -92,20 +92,6 @@ cleanup_sig(int signum) {
     die(signum, NULL);
 }
 
-struct tmpbus *allocate_bus() {
-    struct tmpbus *result = malloc(sizeof(struct tmpbus));
-    assert(result);
-    memset(result, 0, sizeof(struct tmpbus));
-
-    // essential field initialisation:
-    assert(result->tmpbus_position = malloc(sizeof(struct shmif_handle)));
-    memset(result, 0, sizeof(struct shmif_handle));
-    strcpy(result->tmpbus_name, "busXXXXXX\0");
-    assert(*mktemp(result->tmpbus_name) != 0);
-
-    return result;
-}
-
 void deallocate_bus(gpointer dataptr) {
     struct tmpbus *busptr = dataptr;
 
@@ -122,6 +108,26 @@ void deallocate_bus(gpointer dataptr) {
     }
     free(busptr->tmpbus_position);
     free(busptr);
+}
+
+struct tmpbus *allocate_bus() {
+    struct tmpbus *result = malloc(sizeof(struct tmpbus));
+    assert(result);
+    memset(result, 0, sizeof(struct tmpbus));
+
+    // essential field initialisation:
+    result->tmpbus_position = malloc(sizeof(struct shmif_handle));
+    assert(result->tmpbus_position);
+    memset(result, 0, sizeof(struct shmif_handle));
+    strcpy(result->tmpbus_name, "busXXXXXX\0");
+    result->tmpbus_hdl = mkstemp(result->tmpbus_name);
+    if (result->tmpbus_hdl <= 0) {
+        result->tmpbus_hdl = 0;
+        deallocate_bus(result);
+        die(errno, "open tmpbus");
+    }
+
+    return result;
 }
 
 void deallocate_watch(gpointer arg) {
@@ -238,8 +244,9 @@ static void
 shmif_unlockbus(struct shmif_mem *busmem)
 {
     mfence();
-	assert(compare_exchange(&busmem->shm_lock,
-                LOCK_LOCKED, LOCK_UNLOCKED) == LOCK_LOCKED);
+	uint32_t old = compare_exchange(&busmem->shm_lock,
+                LOCK_LOCKED, LOCK_UNLOCKED);
+    assert(old == LOCK_LOCKED);
 }
 
 int initbus(struct tmpbus *newbus) {
@@ -468,7 +475,10 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
                 } else if (pass != DROP_FRAME) {
                     struct tmpbus *destbus = (struct tmpbus*)
                         g_hash_table_lookup(busses, GINT_TO_POINTER(pass));
-                    assert(destbus);
+                    if (!destbus) {
+                        ERR("Invalid bus at ID %d\n", pass);
+                        die(225, NULL);
+                    }
                     writebus(destbus, packet, pkthdr.sp_len);
                 }
             }
@@ -489,7 +499,10 @@ void handle_tapread(evutil_socket_t sockfd, short events, void *ignore) {
         } else if (pass != DROP_FRAME) {
             struct tmpbus *destbus = (struct tmpbus*)
                 g_hash_table_lookup(busses, GINT_TO_POINTER(pass));
-            assert(destbus);
+            if (!destbus) {
+                ERR("Invalid bus at ID %d\n", pass);
+                die(226, NULL);
+            }
             writebus((struct tmpbus*) destbus,
                     readbuf, pktlen);
         }
@@ -549,16 +562,6 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
 
     ERR("Creating Bus\n");
     struct tmpbus *newbus = allocate_bus();
-
-    newbus->tmpbus_hdl = open(
-            newbus->tmpbus_name,
-            O_RDWR | O_CREAT | O_TRUNC,
-            0644);
-    if (newbus->tmpbus_hdl <= 0) {
-        newbus->tmpbus_hdl = 0;
-        deallocate_bus(newbus);
-        die(errno, "open tmpbus");
-    }
 
 #if 0
     ERR("Creating semaphore\n");
@@ -670,7 +673,10 @@ int main(int argc, char *argv[]) {
     }
     // 128 used to be hard-coded into the linux kernel
     // and is still the default upper limit for the backlog
-    assert(listen(unix_socket, 128) == 0);
+    if (listen(unix_socket, 128) != 0) {
+        perror("listen");
+        die(errno, "listen");
+    }
 
     ERR("Creating UNIX socket listener event\n");
     unix_socket_listener_event = event_new(
