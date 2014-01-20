@@ -216,14 +216,18 @@ writebus(int memfd, struct shmif_mem *busmem,
         packet, pktsize, &wrap);
     if (wrap) {
         busmem->shm_gen++;
+#ifdef DEBUG
         ERR("bus generation now %" PRIu64 "\n", busmem->shm_gen);
+#endif
     }
     shmif_unlockbus(busmem);
 
     wrote = true;
 
+#ifdef DEBUG
     ERR("shmif_start: send %d bytes at off %d\n",
         pktsize, busmem->shm_last);
+#endif
 
 	/* wakeup? */
 	if (wrote) {
@@ -301,8 +305,10 @@ readbus(struct shmif_mem *busmem, struct shmif_handle *sc,
             sc->sc_devgen = busmem->shm_gen - 1;
         else
             sc->sc_devgen = busmem->shm_gen;
+#ifdef DEBUG
         ERR("dev %p overrun, new data: %d/%" PRIu64 "\n",
             sc, nextpkt, sc->sc_devgen);
+#endif
     }
 
     /*
@@ -326,8 +332,10 @@ readbus(struct shmif_mem *busmem, struct shmif_handle *sc,
     nextpkt = shmif_busread(busmem, *packet,
         nextpkt, spp->sp_len, &wrap);
 
+#ifdef DEBUG
     ERR("shmif_rcv: read packet of length %d at %d\n",
         spp->sp_len, nextpkt);
+#endif
 
     sc->sc_nextpacket = nextpkt;
     shmif_unlockbus(busmem);

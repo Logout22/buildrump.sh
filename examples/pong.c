@@ -7,6 +7,8 @@
 #include <errno.h>
 #include <err.h>
 
+#include "benchmarks.h"
+
 #define ERR(...) { \
 	fprintf(stderr, "srv: "); \
 	fprintf(stderr, __VA_ARGS__); \
@@ -56,21 +58,22 @@ int main(int argc, char *argv[]) {
     char rbuf[bufsize + 1];
     rbuf[bufsize] = 0;
 	//ERR("Reading at most %d bytes\n", bufsize);
-	for(int i = 0; i < 4; i++) {
+	for(int i = 0; i < BM_COUNT; i++) {
 		res = read(rcvsock, rbuf, bufsize);
-		if (res <= 0) {
+		if (res <= 0  || strcmp(rbuf, STR_PING) != 0) {
 			die(errno, "read");
 		}
-		ERR("rcvd %s\n", rbuf);
-		sleep(1);
-        char const wbuf[] = "Pong.\0";
+		/*ERR("rcvd %s\n", rbuf);
+		sleep(1);*/
+        char const wbuf[] = STR_PONG;
         res = write(rcvsock, wbuf, sizeof(wbuf));
         if (res <= 0) {
             die(errno, "write");
         }
+        runs++;
 	}
     close(rcvsock);
 
-	ERR("Closing\n");
+	ERR("Closing after %d runs\n", runs);
     close(tcpsock);
 }
