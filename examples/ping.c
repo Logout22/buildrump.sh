@@ -43,7 +43,7 @@ cleanup(int signum) {
     die(signum, NULL);
 }
 
-#define err(...) { \
+#define ERR(...) { \
     fprintf(stderr, "clt: "); \
     fprintf(stderr, __VA_ARGS__); \
 }
@@ -57,10 +57,10 @@ int main(int argc, char *argv[]) {
     sigaction(SIGINT, &sigact, NULL);
     sigaction(SIGTERM, &sigact, NULL);
 
-    err("Fetching bus name\n");
+    ERR("Fetching bus name\n");
     int unix_socket = socket(AF_UNIX, SOCK_STREAM, 0);
     if (!unix_socket) {
-        err("socket() failed");
+        ERR("socket() failed");
     }
 
     struct sockaddr_un sockaddr = {
@@ -96,14 +96,14 @@ int main(int argc, char *argv[]) {
         die(errno, "stat");
     }
 
-    err("Creating Bus\n");
+    ERR("Creating Bus\n");
     rump_pub_shmif_create(rbuf, 0);
 
-    err("Setting IP address %s\n", IP_ADDRESS);
+    ERR("Setting IP address %s\n", IP_ADDRESS);
     rump_pub_netconfig_ipv4_ifaddr("shmif0", IP_ADDRESS, "255.255.255.0");
     rump_pub_netconfig_ifup("shmif0");
 
-    err("Creating Socket\n");
+    ERR("Creating Socket\n");
     tcpsock = rump_sys_socket(PF_INET, SOCK_STREAM, 0);
     if (tcpsock <= 0) {
         die(errno, "socket");
@@ -111,7 +111,7 @@ int main(int argc, char *argv[]) {
 
     char const *srv_address = "10.93.48.2";
     short const portnum = 26420;
-    err("Connecting to %s:%d\n", srv_address, portnum);
+    ERR("Connecting to %s:%d\n", srv_address, portnum);
     struct sockaddr_in sin = {
         .sin_family = AF_INET,
         .sin_port = htons(portnum),
@@ -133,7 +133,7 @@ int main(int argc, char *argv[]) {
         if (res <= 0) {
             die(errno, "read");
         }
-        err("rcvd %s\n", rbuf);
+        ERR("rcvd %s\n", rbuf);
         sleep(1);
     }
 
