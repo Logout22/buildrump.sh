@@ -8,10 +8,10 @@
 #define FRAME_TO_ALL -1
 
 #include <stdbool.h>
+#include <arpa/inet.h>
 
-void init_hive();
+void init_hive(in_addr_t ip_address);
 void shutdown_hive();
-int pass_for_port(int,short,short,bool,bool);
 int pass_for_frame(void*,int,bool);
 void remove_ports_for_watch(int);
 

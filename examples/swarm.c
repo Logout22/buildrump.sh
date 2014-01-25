@@ -42,9 +42,24 @@
 
 #include <glib.h>
 
-#include "common.h"
+#include "swarm.h"
+#include "swarm_ipc.h"
 #include "hive.h"
 #include "shmifvar.h"
+
+#define IP_ADDRESS "10.93.48.100"
+in_addr_t ip_addr_num;
+
+//defining some BSD specific macros
+#include <stddef.h>
+
+#include <linux/if_ether.h>
+#ifndef ETHER_HDR_LEN
+    #define ETHER_HDR_LEN ETH_HLEN
+#endif
+#ifndef ETHERMTU
+    #define ETHERMTU ETH_DATA_LEN
+#endif
 
 #define ERR(...) { \
     fprintf(stderr, "swarm: "); \
@@ -57,6 +72,8 @@ struct shmif_handle {
     uint32_t sc_nextpacket;
 };
 
+#define TMPBUS_NAME_LEN 10
+
 /* NOTE: Do NOT instantiate struct tmpbus directly.
  * Use something like:
  *
@@ -65,7 +82,7 @@ struct shmif_handle {
  * deallocate_bus(myvar);
  */
 struct tmpbus {
-    char tmpbus_name[10];
+    char tmpbus_name[TMPBUS_NAME_LEN];
     int tmpbus_hdl;
     struct shmif_mem *tmpbus_header;
     struct shmif_handle *tmpbus_position;
@@ -119,7 +136,7 @@ struct tmpbus *allocate_bus() {
     result->tmpbus_position = malloc(sizeof(struct shmif_handle));
     assert(result->tmpbus_position);
     memset(result, 0, sizeof(struct shmif_handle));
-    strcpy(result->tmpbus_name, "busXXXXXX\0");
+    strcpy(result->tmpbus_name, "busXXXXXX");
     result->tmpbus_hdl = mkstemp(result->tmpbus_name);
     if (result->tmpbus_hdl <= 0) {
         result->tmpbus_hdl = 0;
@@ -509,29 +526,15 @@ void handle_tapread(evutil_socket_t sockfd, short events, void *ignore) {
     }
 }
 
-void readstruct(int fd, void* structp, size_t structsize) {
-    size_t bytes_total = structsize,
-           bytes_to_read = bytes_total;
-    // proceed bytewise (int8_t*)
-    int8_t *hdrp = structp;
-    while (bytes_to_read > 0) {
-        ssize_t this_read = read(fd, hdrp, bytes_to_read);
-        if (this_read <= 0) {
-            die(errno, "read from UNIX socket");
-        }
-        hdrp += this_read;
-        bytes_to_read -= this_read;
-    }
-    // no negative values (overreads)
-    assert(bytes_to_read == 0);
-}
-
+#if 0
 #define PREAMBLE "rumpuser_shmif_lock_"
 /* includes terminating 0: */
 #define PREAMBLE_LEN 21
+#endif
 
 void unix_accept(evutil_socket_t sock, short events, void *ignore) {
     int fd = accept(sock, NULL, 0);
+
     if (fd <= 0) {
         die(errno, "accept");
         return;
@@ -540,22 +543,16 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
         return;
     }
 
+    evutil_make_socket_nonblocking(fd);
+
     /* handle clients one by one
      * to avoid races on the process table
      * (registering is not done often, so no need to hurry)
      */
-    struct getshm_msg regproc;
-    readstruct(fd, &regproc.gs_header, sizeof(regproc.gs_header));
-    if (regproc.gs_header.um_ver > USOCK_VERSION ||
-            regproc.gs_header.um_msgid != SWARM_GETSHM) {
-        ERR("Unsupported client\n");
-        close(fd);
-        return;
-    }
-    pid_t caller_pid = -1;
-    readstruct(fd, &caller_pid, sizeof(pid_t));
-    if (caller_pid < 0) {
-        ERR("PID < 0 - Closing\n");
+
+    int res;
+    if ((res = rcv_request_swarm_getshm(fd))) {
+        ERR("Invalid GETSHM message: %d. Closing.\n", -res);
         close(fd);
         return;
     }
@@ -592,11 +589,16 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
         deallocate_bus(newbus);
         die(errno, "inotify watch");
     }
-    g_hash_table_insert(
-            busses, GINT_TO_POINTER(new_wd), newbus);
 
     // now answer the client with the bus file name
-    write(fd, newbus->tmpbus_name, sizeof(newbus->tmpbus_name));
+    if ((res = reply_swarm_getshm(
+                fd, ip_addr_num, newbus->tmpbus_name))) {
+        deallocate_bus(newbus);
+        ERR("Error replying the client side: %d\n", -res);
+    } else {
+        g_hash_table_insert(
+                busses, GINT_TO_POINTER(new_wd), newbus);
+    }
     close(fd);
 }
 
@@ -608,7 +610,8 @@ int main(int argc, char *argv[]) {
     sigaction(SIGINT, &sigact, NULL);
     sigaction(SIGTERM, &sigact, NULL);
 
-    init_hive();
+    ip_addr_num = inet_addr(IP_ADDRESS);
+    init_hive(ip_addr_num);
 
     //can eventually be disabled
     event_enable_debug_mode();

@@ -1,28 +1,28 @@
-#include "common.h"
 #include "hive.h"
+#include "swarm.h"
+#include "swarm_ipc.h"
 
 #include <stdio.h>
 #include <glib.h>
 #include <inttypes.h>
-#include <arpa/inet.h>
 
 #define ERR(...) { \
     fprintf(stderr, "hive: "); \
     fprintf(stderr, __VA_ARGS__); \
 }
 
-static GHashTable *hive_outgoing, *hive_incoming;
+static GHashTable *hive_table[2];
 static in_addr_t ip_address_numeric;
 
-void init_hive() {
-//    hive_outgoing = g_hash_table_new(NULL, NULL);
-    hive_incoming = g_hash_table_new(NULL, NULL);
-    ip_address_numeric = inet_addr(IP_ADDRESS);
+void init_hive(in_addr_t ip_address) {
+    hive_table[PROTOCOL_TCP] = g_hash_table_new(NULL, NULL);
+    hive_table[PROTOCOL_UDP] = g_hash_table_new(NULL, NULL);
+    ip_address_numeric = ip_address;
 }
 
 void shutdown_hive() {
-    g_hash_table_unref(hive_incoming);
-//    g_hash_table_unref(hive_outgoing);
+    g_hash_table_unref(hive_table[PROTOCOL_UDP]);
+    g_hash_table_unref(hive_table[PROTOCOL_TCP]);
 }
 
 // offset of source and destination address in Ethernet
@@ -96,18 +96,15 @@ static struct conn_desc get_conn_metadata(void *packet, bool is_tcp) {
     return res;
 }
 
-#define TABLE_TCP 0
-#define TABLE_UDP 1
-
 static int lookup_dest_bus(short dest_port, int table_idx) {
     int pass;
     gpointer key, value;
     int i_lookup = dest_port & 0xFFFF;
     gpointer lookup = GINT_TO_POINTER(i_lookup);
     if (!g_hash_table_lookup_extended(
-                hive_incoming, lookup, &key, &value)) {
-        // do not know target bus yet, wait for outgoing
-        pass = FRAME_TO_ALL;
+                hive_table[table_idx], lookup, &key, &value)) {
+        // connection unknown, drop the frame
+        pass = DROP_FRAME;
     } else {
         pass = GPOINTER_TO_INT(value);
     }
@@ -115,66 +112,18 @@ static int lookup_dest_bus(short dest_port, int table_idx) {
     return pass;
 }
 
-static bool connection_ok(int srcbus_id, short source_port) {
-    gpointer key, value;
-    int i_lookup = source_port & 0xFFFF;
-    gpointer lookup = GINT_TO_POINTER(i_lookup);
-    if (!g_hash_table_lookup_extended(
-            hive_incoming, lookup, &key, &value)) {
-        // register connection
-        g_hash_table_insert(
-            hive_incoming, lookup, GINT_TO_POINTER(srcbus_id));
-    } else if (srcbus_id != GPOINTER_TO_INT(value)) {
-        // connection not registered
-        return false;
-    }
-    return true;
-}
-
 static int pass_for_port_local(int srcbus_id,
         short source_port, short dest_port,
         bool outgoing, bool is_tcp) {
     int pass = DROP_FRAME;
-    gpointer key, value, lookup;
-
-    //FIXME insert hive_desc
-    if (!is_tcp) {
-        //FIXME create UDP remote connection cache
-        //as part of GHashTable array (indexes above)
-        //(less overhead than total connection cache,
-        //should cover most use cases)
-        pass = lookup_dest_bus(dest_port, TABLE_UDP);
-    } else if (!outgoing || connection_ok(srcbus_id, source_port)) {
-        // FIXME is TABLE_TCP correct?
-        pass = lookup_dest_bus(dest_port, TABLE_TCP);
-    }
-    return pass;
-}
-
-static int pass_for_port_remote(int srcbus_id,
-        short source_port,
-        bool outgoing, bool is_tcp) {
-    int pass = DROP_FRAME;
-    gpointer key, value;
-    /* This function only handles outgoing packets
-     * because we are not supposed to process packets
-     * that belong to other hosts.
-     *
-     * If they are outgoing, we need to make sure that they are
-     * either UDP packets, which are not connection-based,
-     * or that their connection data is valid, i.e. the packet
-     * starts a new connection or continues an old one.
-     */
-    if (outgoing) {
+    // dest==source surely is not valid:
+    if (source_port != dest_port) {
         if (!is_tcp) {
-            //FIXME table for UDP different from table for TCP
-            //TODO register remote UDP connections only
-            //in UDP cache: (srcbus_id, source_port)
-            // register connection if necessary
-            connection_ok(srcbus_id, source_port);
-            pass = FRAME_TO_TAP;
-        } else if (connection_ok(srcbus_id, source_port)) {
-            pass = FRAME_TO_TAP;
+            // check if this connection exists in the UDP table
+            pass = lookup_dest_bus(dest_port, PROTOCOL_UDP);
+        } else {
+            // check if this connection exists in the TCP table
+            pass = lookup_dest_bus(dest_port, PROTOCOL_TCP);
         }
     }
     return pass;
@@ -207,10 +156,13 @@ int pass_for_frame(void *frame, int srcbus_id, bool outgoing) {
                             pktcd.cd_dest_port,
                             outgoing, is_tcp);
                 } else {
-                    pass = pass_for_port_remote(
-                            srcbus_id,
-                            pktcd.cd_source_port,
-                            outgoing, is_tcp);
+                    if (outgoing) {
+                        // this is not for our realm -- send it out
+                        pass = FRAME_TO_TAP;
+                    } else {
+                        // otherwise we are not responsible -- drop it
+                        pass = DROP_FRAME;
+                    }
                 }
         }
     }
@@ -226,7 +178,9 @@ gboolean rm_watch(gpointer key, gpointer value, gpointer watch) {
 }
 
 void remove_ports_for_watch(int watchfd) {
-    // FIXME delete UDP cache entries too
     g_hash_table_foreach_remove(
-            hive_incoming, rm_watch, GINT_TO_POINTER(watchfd));
+            hive_table[PROTOCOL_TCP], rm_watch, GINT_TO_POINTER(watchfd));
+    g_hash_table_foreach_remove(
+            hive_table[PROTOCOL_UDP], rm_watch, GINT_TO_POINTER(watchfd));
 }
+

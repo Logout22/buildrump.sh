@@ -23,7 +23,8 @@
 #include <rump/rump_syscalls.h>
 #include <rump/rumpnet_if_pub.h>
 
-#include "common.h"
+#include "swarm.h"
+#include "swarm_ipc.h"
 
 static void __attribute__((__noreturn__))
 die(int e, const char *msg)
@@ -61,6 +62,7 @@ int main(int argc, char *argv[]) {
     int unix_socket = socket(AF_UNIX, SOCK_STREAM, 0);
     if (!unix_socket) {
         ERR("socket() failed");
+        die(errno, "socket");
     }
 
     struct sockaddr_un sockaddr = {
@@ -73,34 +75,34 @@ int main(int argc, char *argv[]) {
         die(errno, "connect");
     }
 
-    struct getshm_msg msg1 = {
-        .gs_header = {
-            .um_ver = USOCK_VERSION,
-            .um_msgid = SWARM_GETSHM
-        },
-        .gs_pid = getpid(),
-    };
-    write(unix_socket, &msg1, sizeof(msg1));
+    if (request_swarm_getshm(unix_socket)) {
+        ERR("Could request SHM\n");
+        die(errno, "payload");
+    }
 
-    int const bufsize = 50;
-    char rbuf[bufsize + 1];
-    rbuf[bufsize] = 0;
-    if (read(unix_socket, rbuf, bufsize) <= 0) {
+    char *filename;
+    in_addr_t ip_address;
+    if (rcv_reply_swarm_getshm(unix_socket, &ip_address, &filename) <= 0) {
+        ERR("Could not read reply\n");
         die(errno, "read");
     }
-    close(unix_socket);
 
     // bus file must be local and stat()-able
     struct stat statstruct = {};
-    if (stat(rbuf, &statstruct) != 0) {
+    if (stat(filename, &statstruct) != 0) {
         die(errno, "stat");
     }
 
     ERR("Creating Bus\n");
-    rump_pub_shmif_create(rbuf, 0);
+    rump_pub_shmif_create(filename, 0);
+    free(filename);
 
-    ERR("Setting IP address %s\n", IP_ADDRESS);
-    rump_pub_netconfig_ipv4_ifaddr("shmif0", IP_ADDRESS, "255.255.255.0");
+    char const *ip_address_str = inet_ntoa(
+            (struct in_addr) { .s_addr = ip_address } );
+
+    ERR("Setting IP address %s\n", ip_address_str);
+    rump_pub_netconfig_ipv4_ifaddr(
+            "shmif0", ip_address_str, "255.255.255.0");
     rump_pub_netconfig_ifup("shmif0");
 
     ERR("Creating Socket\n");
@@ -117,12 +119,16 @@ int main(int argc, char *argv[]) {
         .sin_port = htons(portnum),
     };
     inet_aton(srv_address, &sin.sin_addr);
-    int res = rump_sys_connect(tcpsock, (struct sockaddr*) &sin, sizeof(sin));
+    int res = rump_sys_connect(
+            tcpsock, (struct sockaddr*) &sin, sizeof(sin));
     if (res != 0) {
         die(errno, "connect");
     }
 
     int i;
+    int const bufsize = 50;
+    char rbuf[bufsize + 1];
+    rbuf[bufsize] = 0;
     for(i = 0; i < 4; i++) {
         char const wbuf[] = "Ping.\0";
         res = rump_sys_write(tcpsock, wbuf, sizeof(wbuf));
@@ -138,6 +144,7 @@ int main(int argc, char *argv[]) {
     }
 
     rump_sys_close(tcpsock);
+    close(unix_socket);
 
     die(0, NULL);
 }
