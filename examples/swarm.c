@@ -39,6 +39,8 @@
 #if !defined(LIBEVENT_VERSION_NUMBER) || LIBEVENT_VERSION_NUMBER < 0x02000100
 #error "This version of Libevent is not supported; Get 2.0.1-alpha or later."
 #endif
+#include <event2/buffer.h>
+#include <event2/bufferevent.h>
 
 #include <glib.h>
 
@@ -84,6 +86,7 @@ struct shmif_handle {
 struct tmpbus {
     char tmpbus_name[TMPBUS_NAME_LEN];
     int tmpbus_hdl;
+    int tmpbus_wd;
     struct shmif_mem *tmpbus_header;
     struct shmif_handle *tmpbus_position;
     struct event *tmpbus_event;
@@ -526,6 +529,37 @@ void handle_tapread(evutil_socket_t sockfd, short events, void *ignore) {
     }
 }
 
+void handle_unixread(evutil_socket_t sockfd, short events, void *data) {
+    struct tmpbus *thisbus = (struct tmpbus*) data;
+
+    int res;
+    if ((res = rcv_message_type(sockfd)) <= 0) {
+        goto unixread_error;
+    }
+
+    switch(res) {
+        case HIVE_BIND:
+            {
+                uint32_t protocol, resource;
+                if ((res = rcv_request_hive_bind(
+                                sockfd, &protocol, &resource))) {
+                    goto unixread_error;
+                }
+                register_connection(
+                        sockfd, thisbus->tmpbus_wd, protocol, resource);
+            }
+            break;
+    }
+    return;
+
+unixread_error:
+    ERR("Received garbage: %d -- closing\n", res);
+    deallocate_watch(GINT_TO_POINTER(thisbus->tmpbus_wd));
+    deallocate_bus(thisbus);
+    close(sockfd);
+    return;
+}
+
 #if 0
 #define PREAMBLE "rumpuser_shmif_lock_"
 /* includes terminating 0: */
@@ -549,9 +583,8 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
      * to avoid races on the process table
      * (registering is not done often, so no need to hurry)
      */
-
     int res;
-    if ((res = rcv_request_swarm_getshm(fd))) {
+    if ((res = rcv_message_type(fd)) != SWARM_GETSHM) {
         ERR("Invalid GETSHM message: %d. Closing.\n", -res);
         close(fd);
         return;
@@ -589,6 +622,7 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
         deallocate_bus(newbus);
         die(errno, "inotify watch");
     }
+    newbus->tmpbus_wd = new_wd;
 
     // now answer the client with the bus file name
     if ((res = reply_swarm_getshm(
@@ -599,7 +633,14 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
         g_hash_table_insert(
                 busses, GINT_TO_POINTER(new_wd), newbus);
     }
-    close(fd);
+
+    newbus->tmpbus_event = event_new(
+            ev_base, fd, EV_READ|EV_PERSIST,
+            handle_unixread, newbus);
+    if (newbus->tmpbus_event == NULL) {
+        die(0, "new bus event_new");
+    }
+    event_add(newbus->tmpbus_event, NULL);
 }
 
 int main(int argc, char *argv[]) {

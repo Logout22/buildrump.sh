@@ -6,15 +6,6 @@
 #include <assert.h>
 #include <errno.h>
 
-#define USOCK_VERSION 1
-
-#define SWARM_GETSHM 1
-#define SWARM_GETSHM_REPLY 3
-#define HIVE_BIND 2
-#define HIVE_BIND_REPLY 4
-
-typedef ssize_t (*fileop)(int,void*,size_t);
-
 struct unxsock_msg {
     uint32_t um_ver;
     int32_t um_msgid;
@@ -56,7 +47,6 @@ static bool OP##_struct(int fd, CONST void *structp, size_t structsize) { \
         } \
 \
         bytes_to_process -= this_run; \
-\
         hdrp += this_run; \
     } \
     /* no negative values (overreads) */ \
@@ -68,11 +58,7 @@ static bool OP##_struct(int fd, CONST void *structp, size_t structsize) { \
 DEFINE_STRUCT_OPERATION(read,);
 DEFINE_STRUCT_OPERATION(write, const);
 
-/**
- * Receives the message header from \c sock and returns the message type.
- * \returns the message type ID or a negative error code
- */
-static int32_t rcv_message_type(int sock) {
+int32_t rcv_message_type(int sock) {
     struct unxsock_msg rcvd_hdr;
     if (!read_struct(sock, &rcvd_hdr, sizeof(rcvd_hdr)) ||
             rcvd_hdr.um_ver > USOCK_VERSION) {
@@ -166,19 +152,11 @@ int reply_hive_bind(int sock, int32_t result) {
 }
 
 int rcv_request_swarm_getshm(int sock) {
-    int res;
-    if ((res = rcv_message_type(sock)) != SWARM_GETSHM) {
-        return res;
-    }
+    /* fill in something as soon as required */
     return 0;
 }
 
 int rcv_reply_swarm_getshm(int sock, in_addr_t *ip_addr, char **filename) {
-    int res;
-    if ((res = rcv_message_type(sock)) != SWARM_GETSHM_REPLY) {
-        return res;
-    }
-
     struct getshm_rep to_rcv = {};
     if (!read_struct(sock, &to_rcv, sizeof(to_rcv))) {
         return -errno;
@@ -203,11 +181,6 @@ int rcv_reply_swarm_getshm(int sock, in_addr_t *ip_addr, char **filename) {
 }
 
 int rcv_request_hive_bind(int sock, uint32_t *protocol, uint32_t *port) {
-    int res;
-    if ((res = rcv_message_type(sock)) != HIVE_BIND) {
-        return res;
-    }
-
     struct bind_msg to_rcv = {};
     if (!read_struct(sock, &to_rcv, sizeof(to_rcv))) {
         return -errno;
@@ -219,11 +192,6 @@ int rcv_request_hive_bind(int sock, uint32_t *protocol, uint32_t *port) {
 }
 
 int rcv_reply_hive_bind(int sock, int32_t *result) {
-    int res;
-    if ((res = rcv_message_type(sock)) != HIVE_BIND_REPLY) {
-        return res;
-    }
-
     struct bind_rep to_rcv = {};
     if (!read_struct(sock, &to_rcv, sizeof(to_rcv))) {
         return -errno;

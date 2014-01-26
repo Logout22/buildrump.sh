@@ -37,23 +37,18 @@ int main(int argc, char *argv[]) {
         die(errno, "socket");
     }
 
+    char const *srv_address = "10.93.48.100";
     short const portnum = 26420;
-    ERR("Binding to port %d\n", portnum);
+    ERR("Connecting to %s:%d\n", srv_address, portnum);
     struct sockaddr_in sin = {
         .sin_family = AF_INET,
         .sin_port = htons(portnum),
     };
-    // listen from all addresses
-    memset(&sin.sin_addr, 0, sizeof(sin.sin_addr));
-    int res = bind(tcpsock, (struct sockaddr*) &sin, sizeof(sin));
+    inet_aton(srv_address, &sin.sin_addr);
+    int res = connect(
+            tcpsock, (struct sockaddr*) &sin, sizeof(sin));
     if (res != 0) {
-        die(errno, "bind");
-    }
-
-    ERR("Listening (Queue length 120)\n");
-    res = listen(tcpsock, 120);
-    if (res != 0) {
-        die(errno, "listen");
+        die(errno, "connect");
     }
 
     struct sigaction sigact = {
@@ -62,37 +57,26 @@ int main(int argc, char *argv[]) {
     sigaction(SIGINT, &sigact, NULL);
     sigaction(SIGTERM, &sigact, NULL);
 
-    for(;;) {
-        ERR("Accepting...\n");
-        int rcvsock = accept(tcpsock, NULL, 0);
-        if (rcvsock <= 0) {
-            die(errno, "accept");
+    int i;
+    int const bufsize = 50;
+    char rbuf[bufsize + 1];
+    rbuf[bufsize] = 0;
+    for(i = 0; i < 4; i++) {
+        char const wbuf[] = "Ping.\0";
+        res = write(tcpsock, wbuf, sizeof(wbuf));
+        if (res <= 0) {
+            die(errno, "write");
         }
-
-        int const bufsize = 50;
-        char rbuf[bufsize + 1];
-        rbuf[bufsize] = 0;
-        //ERR("Reading at most %d bytes\n", bufsize);
-        //int i;
-        while((res = read(rcvsock, rbuf, bufsize)) > 0) {
-            /*
-            if (res <= 0) {
-                die(errno, "read");
-            }
-            */
-            ERR("rcvd %s\n", rbuf);
-            sleep(1);
-            char const wbuf[] = "Pong.\0";
-            res = write(rcvsock, wbuf, sizeof(wbuf));
-            if (res <= 0) {
-                die(errno, "write");
-            }
+        res = read(tcpsock, rbuf, bufsize);
+        if (res <= 0) {
+            die(errno, "read");
         }
-        close(rcvsock);
+        ERR("rcvd %s\n", rbuf);
+        sleep(1);
     }
 
-    ERR("Closing\n");
     close(tcpsock);
+
 
     exit(0);
 }

@@ -80,6 +80,11 @@ int main(int argc, char *argv[]) {
         die(errno, "payload");
     }
 
+    if (rcv_message_type(unix_socket) != SWARM_GETSHM_REPLY) {
+        ERR("Incompatible server\n");
+        die(errno, "reply");
+    }
+
     char *filename;
     in_addr_t ip_address;
     if (rcv_reply_swarm_getshm(unix_socket, &ip_address, &filename) <= 0) {
@@ -90,6 +95,7 @@ int main(int argc, char *argv[]) {
     // bus file must be local and stat()-able
     struct stat statstruct = {};
     if (stat(filename, &statstruct) != 0) {
+        free(filename);
         die(errno, "stat");
     }
 
@@ -111,39 +117,64 @@ int main(int argc, char *argv[]) {
         die(errno, "socket");
     }
 
-    char const *srv_address = "10.93.48.2";
     short const portnum = 26420;
-    ERR("Connecting to %s:%d\n", srv_address, portnum);
+    ERR("Binding to port %d\n", portnum);
     struct sockaddr_in sin = {
         .sin_family = AF_INET,
         .sin_port = htons(portnum),
     };
-    inet_aton(srv_address, &sin.sin_addr);
-    int res = rump_sys_connect(
-            tcpsock, (struct sockaddr*) &sin, sizeof(sin));
+    // listen from all addresses
+    memset(&sin.sin_addr, 0, sizeof(sin.sin_addr));
+
+    //TODO remove ASA implicit bind works
+    int res;
+    if ((res = request_hive_bind(unix_socket, PROTOCOL_TCP, portnum))) {
+        die(-res, "explicit bind");
+    }
+
+    res = rump_sys_bind(tcpsock, (struct sockaddr*) &sin, sizeof(sin));
     if (res != 0) {
-        die(errno, "connect");
+        die(errno, "bind");
     }
 
-    int i;
-    int const bufsize = 50;
-    char rbuf[bufsize + 1];
-    rbuf[bufsize] = 0;
-    for(i = 0; i < 4; i++) {
-        char const wbuf[] = "Ping.\0";
-        res = rump_sys_write(tcpsock, wbuf, sizeof(wbuf));
-        if (res <= 0) {
-            die(errno, "write");
-        }
-        res = rump_sys_read(tcpsock, rbuf, bufsize);
-        if (res <= 0) {
-            die(errno, "read");
-        }
-        ERR("rcvd %s\n", rbuf);
-        sleep(1);
+    ERR("Listening (Queue length 120)\n");
+    res = rump_sys_listen(tcpsock, 120);
+    if (res != 0) {
+        die(errno, "listen");
     }
 
+    for(;;) {
+        ERR("Accepting...\n");
+        int rcvsock = rump_sys_accept(tcpsock, NULL, 0);
+        if (rcvsock <= 0) {
+            die(errno, "accept");
+        }
+
+        int const bufsize = 50;
+        char rbuf[bufsize + 1];
+        rbuf[bufsize] = 0;
+        //ERR("Reading at most %d bytes\n", bufsize);
+        //int i;
+        while((res = rump_sys_read(rcvsock, rbuf, bufsize)) > 0) {
+            /*
+            if (res <= 0) {
+                die(errno, "read");
+            }
+            */
+            ERR("rcvd %s\n", rbuf);
+            sleep(1);
+            char const wbuf[] = "Pong.\0";
+            res = rump_sys_write(rcvsock, wbuf, sizeof(wbuf));
+            if (res <= 0) {
+                die(errno, "write");
+            }
+        }
+        rump_sys_close(rcvsock);
+    }
+
+    ERR("Closing\n");
     rump_sys_close(tcpsock);
+
     close(unix_socket);
 
     die(0, NULL);

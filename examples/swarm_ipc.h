@@ -4,6 +4,13 @@
 #include <inttypes.h>
 #include <arpa/inet.h>
 
+#define USOCK_VERSION 1
+
+#define SWARM_GETSHM 1
+#define SWARM_GETSHM_REPLY 3
+#define HIVE_BIND 2
+#define HIVE_BIND_REPLY 4
+
 #define PROTOCOL_TCP 0
 #define PROTOCOL_UDP 1
 
@@ -41,6 +48,13 @@ int request_hive_bind(int sock, uint32_t protocol, uint32_t port);
  */
 int reply_hive_bind(int sock, int32_t result);
 
+/**
+ * Receives the message header from \c sock and returns the message type.
+ * Always call this function before invoking
+ * one of the other \c rcv_XYZ functions.
+ * \returns the message type ID or a negative error code
+ */
+int32_t rcv_message_type(int sock);
 int rcv_request_swarm_getshm(int sock);
 int rcv_reply_swarm_getshm(int sock, in_addr_t *ip_addr, char **filename);
 int rcv_request_hive_bind(int sock, uint32_t *protocol, uint32_t *port);

@@ -96,7 +96,7 @@ static struct conn_desc get_conn_metadata(void *packet, bool is_tcp) {
     return res;
 }
 
-static int lookup_dest_bus(short dest_port, int table_idx) {
+static int lookup_dest_bus(uint16_t dest_port, int table_idx) {
     int pass;
     gpointer key, value;
     int i_lookup = dest_port & 0xFFFF;
@@ -112,8 +112,23 @@ static int lookup_dest_bus(short dest_port, int table_idx) {
     return pass;
 }
 
+void register_connection(int socket, int bus_id,
+        uint32_t protocol, uint32_t resource) {
+    int32_t result = -1;
+    if (protocol < 2 && resource <= UINT16_MAX &&
+            !g_hash_table_lookup_extended(
+                hive_table[protocol], GINT_TO_POINTER((int) resource),
+                NULL, NULL)) {
+        g_hash_table_insert(
+                hive_table[protocol], GINT_TO_POINTER((int) resource),
+                GINT_TO_POINTER(bus_id));
+        result = 0;
+    }
+    reply_hive_bind(socket, result);
+}
+
 static int pass_for_port_local(int srcbus_id,
-        short source_port, short dest_port,
+        uint16_t source_port, uint16_t dest_port,
         bool outgoing, bool is_tcp) {
     int pass = DROP_FRAME;
     // dest==source surely is not valid:

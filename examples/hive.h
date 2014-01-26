@@ -12,6 +12,7 @@
 
 void init_hive(in_addr_t ip_address);
 void shutdown_hive();
+void register_connection(int, int, uint32_t, uint32_t);
 int pass_for_frame(void*,int,bool);
 void remove_ports_for_watch(int);
 
