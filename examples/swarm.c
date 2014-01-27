@@ -27,12 +27,17 @@
 #include <sys/un.h>
 #include <sys/inotify.h>
 
+#include <net/bpf.h>
+#include <net/if.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <linux/if.h>
+//#include <linux/if.h>
 #include <linux/if_tun.h>
 
-#include <semaphore.h>
+#include <rump/rump.h>
+#include <rump/netconfig.h>
+#include <rump/rump_syscalls.h>
+#include <rump/rumpnet_if_pub.h>
 
 #include <event2/event.h>
 #include <event2/event_struct.h>
@@ -52,27 +57,10 @@
 #define IP_ADDRESS "10.93.48.100"
 in_addr_t ip_addr_num;
 
-//defining some BSD specific macros
-#include <stddef.h>
-
-#include <linux/if_ether.h>
-#ifndef ETHER_HDR_LEN
-    #define ETHER_HDR_LEN ETH_HLEN
-#endif
-#ifndef ETHERMTU
-    #define ETHERMTU ETH_DATA_LEN
-#endif
-
 #define ERR(...) { \
     fprintf(stderr, "swarm: "); \
     fprintf(stderr, __VA_ARGS__); \
 }
-
-// contains the variables necessary to maintain a read state:
-struct shmif_handle {
-    uint64_t sc_devgen;
-    uint32_t sc_nextpacket;
-};
 
 #define TMPBUS_NAME_LEN 10
 
@@ -84,11 +72,11 @@ struct shmif_handle {
  * deallocate_bus(myvar);
  */
 struct tmpbus {
-    char tmpbus_name[TMPBUS_NAME_LEN];
-    int tmpbus_hdl;
+    int tmpbus_iface_id;
+    int tmpbus_bpf_handle;
+    size_t tmpbus_read_len;
     int tmpbus_wd;
-    struct shmif_mem *tmpbus_header;
-    struct shmif_handle *tmpbus_position;
+    char tmpbus_name[TMPBUS_NAME_LEN];
     struct event *tmpbus_event;
 };
 
@@ -104,6 +92,7 @@ die(int e, const char *msg)
 {
     if (msg)
         warn("%s: %d", msg, e);
+    rump_sys_reboot(0, NULL);
     exit(e);
 }
 
@@ -115,18 +104,12 @@ cleanup_sig(int signum) {
 void deallocate_bus(gpointer dataptr) {
     struct tmpbus *busptr = dataptr;
 
+    if (busptr->tmpbus_bpf_handle) {
+        close(busptr->tmpbus_bpf_handle);
+    }
     if (busptr->tmpbus_event) {
         event_free(busptr->tmpbus_event);
     }
-    if (busptr->tmpbus_header) {
-        munmap(busptr->tmpbus_header, BUSMEM_SIZE);
-    }
-    if (busptr->tmpbus_hdl) {
-        close(busptr->tmpbus_hdl);
-        // should be left for debugging purposes:
-        unlink(busptr->tmpbus_name);
-    }
-    free(busptr->tmpbus_position);
     free(busptr);
 }
 
@@ -136,17 +119,29 @@ struct tmpbus *allocate_bus() {
     memset(result, 0, sizeof(struct tmpbus));
 
     // essential field initialisation:
-    result->tmpbus_position = malloc(sizeof(struct shmif_handle));
-    assert(result->tmpbus_position);
-    memset(result, 0, sizeof(struct shmif_handle));
     strcpy(result->tmpbus_name, "busXXXXXX");
-    result->tmpbus_hdl = mkstemp(result->tmpbus_name);
-    if (result->tmpbus_hdl <= 0) {
-        result->tmpbus_hdl = 0;
-        deallocate_bus(result);
+    int tmpbus_hdl = mkstemp(result->tmpbus_name);
+    if (tmpbus_hdl <= 0) {
         die(errno, "open tmpbus");
     }
 
+    rump_pub_shmif_create(result->tmpbus_name, &result->tmpbus_iface_id);
+    close(tmpbus_hdl);
+    result->tmpbus_bpf_handle = rump_sys_open(
+            "/dev/bpf", O_RDWR | O_NONBLOCK);
+    if (result->tmpbus_bpf_handle <= 0) {
+        die(errno, "open bpf");
+    }
+
+    struct ifreq ifr = {};
+    sprintf(ifr.ifr_name, "shmif%d", result->tmpbus_iface_id);
+    if (rump_sys_ioctl(result->tmpbus_bpf_handle, BIOCSETIF, &ifr) == -1) {
+        die(1, "set if");
+    }
+    if ((result->tmpbus_read_len = rump_sys_ioctl(
+                    result->tmpbus_bpf_handle, BIOCGBLEN)) == -1) {
+        die(2, "get read len");
+    }
     return result;
 }
 
@@ -206,248 +201,25 @@ int tun_alloc(char *dev)
   return fd;
 }
 
-static void
-dowakeup(int busfd)
-{
-    uint32_t ver = SHMIF_VERSION;
-    pwrite(busfd, &ver, sizeof(ver), IFMEM_WAKEUP);
+void readbus(struct tmpbus *thisbus, void **packet, size_t *pktlen) {
+    char *readbuffer = malloc(thisbus->tmpbus_read_len);
+    // TODO error handling
+    read(thisbus->tmpbus_bpf_handle, readbuffer, thisbus->tmpbus_read_len);
+    *packet = readbuffer;
+    *pktlen = thisbus->tmpbus_read_len;
 }
 
-#define LOCK_UNLOCKED	0
-#define LOCK_LOCKED	1
-#define LOCK_COOLDOWN	1001
-
-// man, this sucks in Linux
-uint32_t compare_exchange(uint32_t *addr, uint32_t old, uint32_t new) {
-    uint32_t result;
-    asm("mov %1, %%eax;"
-        "cmpxchg %2, %3;"
-        "mov %%eax, %0"
-        : "=r"(result)
-        : "r"(old), "r"(new), "m"(addr)
-        : "%eax");
-    return result;
-}
-
-void mfence() {
-    asm("mfence");
-}
-
-static void
-shmif_lockbus(struct shmif_mem *busmem)
-{
-	int i = 0;
-
-	while (compare_exchange(&busmem->shm_lock,
-                LOCK_UNLOCKED, LOCK_LOCKED) == LOCK_LOCKED) {
-		if (++i > LOCK_COOLDOWN) {
-			/* wait 1ms */
-            struct timespec rqt = { .tv_nsec = 1000*1000 };
-            struct timespec rmt;
-            int rv;
-            do {
-                rv = nanosleep(&rqt, &rmt);
-                rqt = rmt;
-            } while (rv == -1 && errno == EINTR);
-
-            // reset cooldown counter
-			i = 0;
-		}
-		continue;
-	}
-    mfence();
-
-    assert(busmem->shm_lock == LOCK_LOCKED);
-}
-
-static void
-shmif_unlockbus(struct shmif_mem *busmem)
-{
-    mfence();
-	uint32_t old = compare_exchange(&busmem->shm_lock,
-                LOCK_LOCKED, LOCK_UNLOCKED);
-    assert(old == LOCK_LOCKED);
-}
-
-int initbus(struct tmpbus *newbus) {
-    if (ftruncate(newbus->tmpbus_hdl, BUSMEM_SIZE) != 0) {
-        ERR("ftruncate failed\n");
-        return errno;
-    }
-
-    struct shmif_mem *hdr = mmap(NULL, BUSMEM_SIZE,
-            PROT_READ|PROT_WRITE, MAP_FILE|MAP_SHARED,
-            newbus->tmpbus_hdl, 0);
-    if (hdr == MAP_FAILED) {
-        ERR("map failed\n");
-        return errno;
-    }
-
-    shmif_lockbus(hdr);
-	if (hdr->shm_magic == 0) {
-        hdr->shm_magic = SHMIF_MAGIC;
-        hdr->shm_first = BUSMEM_DATASIZE;
-        //hdr->shm_lock = LOCK_LOCKED;
-    }
-    shmif_unlockbus(hdr);
-
-    newbus->tmpbus_header = hdr;
-    return 0;
-}
-
-static void
-writebus(struct tmpbus *thisbus,
-        void *packet, uint32_t pktsize)
-{
-    uint32_t dataoff;
-    bool wrote = false;
-    bool wrap;
-    struct shmif_mem *busmem = thisbus->tmpbus_header;
-
-    struct shmif_pkthdr sp = {};
-
-    assert(pktsize <= ETHERMTU + ETHER_HDR_LEN);
-
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    sp.sp_len = pktsize;
-    sp.sp_sec = ts.tv_sec;
-    sp.sp_usec = ts.tv_nsec / 1000;
-
-    shmif_lockbus(thisbus->tmpbus_header);
-    assert(busmem->shm_magic == SHMIF_MAGIC);
-    busmem->shm_last = shmif_nextpktoff(busmem, busmem->shm_last);
-
-    wrap = false;
-    dataoff = shmif_buswrite(busmem,
-        busmem->shm_last, &sp, sizeof(sp), &wrap);
-    dataoff = shmif_buswrite(busmem, dataoff,
-        packet, pktsize, &wrap);
-    if (wrap) {
-        busmem->shm_gen++;
-        ERR("bus generation now %" PRIu64 "\n", busmem->shm_gen);
-    }
-    shmif_unlockbus(thisbus->tmpbus_header);
-
-    wrote = true;
-
-    ERR("shmif_start: send %d bytes at off %d\n",
-        pktsize, busmem->shm_last);
-
-    /* wakeup? */
-    if (wrote) {
-        dowakeup(thisbus->tmpbus_hdl);
-    }
-}
-
-/*
- * Check if we have been sleeping too long.  Basically,
- * our in-sc nextpkt must by first <= nextpkt <= last"+1".
- * We use the fact that first is guaranteed to never overlap
- * with the last frame in the ring.
- */
-static __inline bool
-stillvalid_p(struct shmif_mem *busmem, struct shmif_handle *sc)
-{
-    unsigned gendiff = busmem->shm_gen - sc->sc_devgen;
-    uint32_t lastoff, devoff;
-
-    assert(busmem->shm_first != busmem->shm_last);
-
-    /* normalize onto a 2x busmem chunk */
-    devoff = sc->sc_nextpacket;
-    lastoff = shmif_nextpktoff(busmem, busmem->shm_last);
-
-    /* trivial case */
-    if (gendiff > 1)
-        return false;
-    assert(gendiff <= 1);
-
-    /* Normalize onto 2x busmem chunk */
-    if (busmem->shm_first >= lastoff) {
-        lastoff += BUSMEM_DATASIZE;
-        if (gendiff == 0)
-            devoff += BUSMEM_DATASIZE;
-    } else {
-        if (gendiff)
-            return false;
-    }
-
-    return devoff >= busmem->shm_first && devoff <= lastoff;
-}
-
-static void
-readbus(struct tmpbus *thisbus,
-        void **packet, struct shmif_pkthdr *spp)
-{
-    uint32_t nextpkt;
-    bool wrap;
-    struct shmif_mem *busmem = thisbus->tmpbus_header;
-    struct shmif_handle *sc = thisbus->tmpbus_position;
-
-    /*ERR("waiting %" PRIu32 "/%" PRIu64 "\n",
-        sc->sc_nextpacket, sc->sc_devgen);*/
-
-    shmif_lockbus(thisbus->tmpbus_header);
-    assert(busmem->shm_magic == SHMIF_MAGIC);
-    assert(busmem->shm_gen >= sc->sc_devgen);
-
-    /* need more data? */
-    if (sc->sc_devgen == busmem->shm_gen &&
-        shmif_nextpktoff(busmem, busmem->shm_last)
-         == sc->sc_nextpacket) {
-        shmif_unlockbus(thisbus->tmpbus_header);
-        // nothing to read
-        *packet = NULL;
-        memset(spp, 0, sizeof(struct shmif_pkthdr));
+void writebus(struct tmpbus *thisbus, void* packet, size_t pktlen) {
+    if (pktlen > thisbus->tmpbus_read_len) {
+        ERR("FIXME cannot write packet, too long\n");
         return;
     }
-
-    if (stillvalid_p(busmem, sc)) {
-        nextpkt = sc->sc_nextpacket;
-    } else {
-        assert(busmem->shm_gen > 0);
-        nextpkt = busmem->shm_first;
-        if (busmem->shm_first > busmem->shm_last)
-            sc->sc_devgen = busmem->shm_gen - 1;
-        else
-            sc->sc_devgen = busmem->shm_gen;
-        ERR("dev %p overrun, new data: %d/%" PRIu64 "\n",
-            sc, nextpkt, sc->sc_devgen);
-    }
-
-    /*
-     * If our read pointer is ahead the bus last write, our
-     * generation must be one behind.
-     */
-    assert(!(nextpkt > busmem->shm_last
-        && sc->sc_devgen == busmem->shm_gen));
-
-    wrap = false;
-
-    nextpkt = shmif_busread(busmem, spp,
-        nextpkt, sizeof(struct shmif_pkthdr), &wrap);
-    assert(spp->sp_len <= ETHERMTU + ETHER_HDR_LEN);
-    /*
-     * We need to allocate memory and use shmif_busread because
-     * packets might wrap around, so they must be copied anyway.
-     */
-    *packet = malloc(spp->sp_len);
-    assert(*packet);
-    nextpkt = shmif_busread(busmem, *packet,
-        nextpkt, spp->sp_len, &wrap);
-
-    ERR("shmif_rcv: read packet of length %d at %d\n",
-        spp->sp_len, nextpkt);
-
-    sc->sc_nextpacket = nextpkt;
-    shmif_unlockbus(thisbus->tmpbus_header);
-
-    if (wrap) {
-        sc->sc_devgen++;
-        DPRINTF(("dev %p generation now %" PRIu64 "\n",
-            sc, sc->sc_devgen));
-    }
+    char *writebuffer = malloc(thisbus->tmpbus_read_len);
+    memset(writebuffer, 0, thisbus->tmpbus_read_len);
+    memcpy(writebuffer, packet, pktlen);
+    // TODO error handling
+    write(thisbus->tmpbus_bpf_handle, packet, pktlen);
+    free(writebuffer);
 }
 
 void send_frame_to_all(void *frame, size_t flen) {
@@ -484,14 +256,14 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
 
         void *packet = NULL;
         do {
-            struct shmif_pkthdr pkthdr = {};
-            readbus(thisbus, &packet, &pkthdr);
+            size_t pktlen = 0;
+            readbus(thisbus, &packet, &pktlen);
             if (packet) {
                 int pass = pass_for_frame(packet, iEvent.wd, true);
                 if (pass == FRAME_TO_TAP) {
-                    write(tapfd, packet, pkthdr.sp_len);
+                    write(tapfd, packet, pktlen);
                 } else if (pass == FRAME_TO_ALL) {
-                    send_frame_to_all(packet, pkthdr.sp_len);
+                    send_frame_to_all(packet, pktlen);
                 } else if (pass != DROP_FRAME) {
                     struct tmpbus *destbus = (struct tmpbus*)
                         g_hash_table_lookup(busses, GINT_TO_POINTER(pass));
@@ -499,9 +271,10 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
                         ERR("Invalid bus at ID %d\n", pass);
                         die(225, NULL);
                     }
-                    writebus(destbus, packet, pkthdr.sp_len);
+                    writebus(destbus, packet, pktlen);
                 }
             }
+            free(packet);
         } while(packet);
     }
 }
@@ -546,7 +319,8 @@ void handle_unixread(evutil_socket_t sockfd, short events, void *data) {
                     goto unixread_error;
                 }
                 register_connection(
-                        sockfd, thisbus->tmpbus_wd, protocol, resource);
+                        sockfd, thisbus->tmpbus_bpf_handle,
+                        protocol, resource);
             }
             break;
     }
@@ -554,7 +328,7 @@ void handle_unixread(evutil_socket_t sockfd, short events, void *data) {
 
 unixread_error:
     ERR("Received garbage: %d -- closing\n", res);
-    deallocate_watch(GINT_TO_POINTER(thisbus->tmpbus_wd));
+    deallocate_watch(GINT_TO_POINTER(thisbus->tmpbus_bpf_handle));
     deallocate_bus(thisbus);
     close(sockfd);
     return;
@@ -608,12 +382,12 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
 	newbus->tmpbus_lock = sem_open(shmif_sem_name, O_CREAT, 0644, 1);
     free(shmif_sem_name);
 	assert(newbus->tmpbus_lock != SEM_FAILED);
-#endif
 
     if (initbus(newbus) != 0) {
         deallocate_bus(newbus);
         die(errno, "init tmpbus");
     }
+#endif
 
     ERR("Add new event\n");
     int new_wd = inotify_add_watch(
@@ -644,6 +418,8 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
 }
 
 int main(int argc, char *argv[]) {
+    rump_init();
+
     atexit(cleanup);
     struct sigaction sigact = {
         .sa_handler = cleanup_sig
