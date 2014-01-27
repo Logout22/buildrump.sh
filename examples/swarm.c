@@ -225,7 +225,7 @@ uint32_t compare_exchange(uint32_t *addr, uint32_t old, uint32_t new) {
         "mov %%eax, %0"
         : "=r"(result)
         : "r"(old), "r"(new), "m"(addr)
-        : "eax");
+        : "%eax");
     return result;
 }
 
@@ -283,13 +283,13 @@ int initbus(struct tmpbus *newbus) {
         return errno;
     }
 
-    shmif_lockbus(newbus->tmpbus_header);
+    shmif_lockbus(hdr);
 	if (hdr->shm_magic == 0) {
         hdr->shm_magic = SHMIF_MAGIC;
         hdr->shm_first = BUSMEM_DATASIZE;
         //hdr->shm_lock = LOCK_LOCKED;
     }
-    shmif_unlockbus(newbus->tmpbus_header);
+    shmif_unlockbus(hdr);
 
     newbus->tmpbus_header = hdr;
     return 0;

@@ -43,6 +43,9 @@ static bool OP##_struct(int fd, CONST void *structp, size_t structsize) { \
     while (bytes_to_process > 0) { \
         ssize_t this_run = OP(fd, hdrp, bytes_to_process); \
         if (this_run <= 0) { \
+            if (errno == EAGAIN || errno == EINTR) { \
+                continue; \
+            } \
             return false; \
         } \
 \
