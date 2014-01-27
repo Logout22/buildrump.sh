@@ -217,20 +217,18 @@ dowakeup(int busfd)
 #define LOCK_LOCKED	1
 #define LOCK_COOLDOWN	1001
 
+void mfence() {
+    asm("mfence");
+}
+
 // man, this sucks in Linux
 uint32_t compare_exchange(uint32_t *addr, uint32_t old, uint32_t new) {
     uint32_t result;
-    asm("mov %1, %%eax;"
-        "cmpxchg %2, %3;"
-        "mov %%eax, %0"
-        : "=r"(result)
-        : "r"(old), "r"(new), "m"(addr)
-        : "%eax");
+    asm("cmpxchgl %3, %1;"
+        : "=a"(result), "+m"(*addr)
+        : "a"(old), "r"(new)
+        : "memory");
     return result;
-}
-
-void mfence() {
-    asm("mfence");
 }
 
 static void
@@ -577,7 +575,7 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
         return;
     }
 
-    evutil_make_socket_nonblocking(fd);
+    //evutil_make_socket_nonblocking(fd);
 
     /* handle clients one by one
      * to avoid races on the process table
@@ -615,6 +613,18 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
         die(errno, "init tmpbus");
     }
 
+    // now answer the client with the bus file name
+    if ((res = reply_swarm_getshm(
+                fd, ip_addr_num, newbus->tmpbus_name))) {
+        deallocate_bus(newbus);
+        ERR("Error replying the client side: %d\n", -res);
+        close(fd);
+        return;
+    }
+
+    //TODO proper ordering
+    sleep(5);
+
     ERR("Add new event\n");
     int new_wd = inotify_add_watch(
             inotify_hdl, newbus->tmpbus_name, IN_MODIFY | IN_CLOSE_WRITE);
@@ -624,16 +634,6 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
     }
     newbus->tmpbus_wd = new_wd;
 
-    // now answer the client with the bus file name
-    if ((res = reply_swarm_getshm(
-                fd, ip_addr_num, newbus->tmpbus_name))) {
-        deallocate_bus(newbus);
-        ERR("Error replying the client side: %d\n", -res);
-    } else {
-        g_hash_table_insert(
-                busses, GINT_TO_POINTER(new_wd), newbus);
-    }
-
     newbus->tmpbus_event = event_new(
             ev_base, fd, EV_READ|EV_PERSIST,
             handle_unixread, newbus);
@@ -641,6 +641,9 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
         die(0, "new bus event_new");
     }
     event_add(newbus->tmpbus_event, NULL);
+
+    g_hash_table_insert(
+            busses, GINT_TO_POINTER(new_wd), newbus);
 }
 
 int main(int argc, char *argv[]) {
@@ -672,6 +675,23 @@ int main(int argc, char *argv[]) {
         tapfd = 0;
         die(errno, "open tap");
     }
+    // send RARP packet
+    // TODO answer ARP packets
+    // TODO use SIOCGIFHWADDR
+    char rarp_packet[] =
+        "\377\377\377\377"
+        "\377\377\126\222"
+        "\005\217\106\217"
+        "\200\065"
+        /* end ethernet*/
+        "\0\001\010\0"
+        "\006\004\0\003"
+        "\0\0\0\0"
+        "\0\0\0\0"
+        "\0\0\126\222"
+        "\005\217\106\217"
+        "\012\135\060\144";
+    write(tapfd, rarp_packet, sizeof(rarp_packet));
     evutil_make_socket_nonblocking(tapfd);
     tap_listener_event = event_new(
             ev_base, tapfd, EV_READ|EV_PERSIST,

@@ -87,7 +87,7 @@ int main(int argc, char *argv[]) {
 
     char *filename;
     in_addr_t ip_address;
-    if (rcv_reply_swarm_getshm(unix_socket, &ip_address, &filename) <= 0) {
+    if (rcv_reply_swarm_getshm(unix_socket, &ip_address, &filename) < 0) {
         ERR("Could not read reply\n");
         die(errno, "read");
     }
