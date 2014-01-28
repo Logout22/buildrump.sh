@@ -54,23 +54,24 @@ die ()
 helpme ()
 {
 
-	exec 1>&2
 	echo "Usage: $0 [-h] [options] [command] [command...]"
 	printf "supported options:\n"
 	printf "\t-d: location for headers/libs.  default: PWD/rump\n"
 	printf "\t-o: location for build-time files.  default: PWD/obj\n"
 	printf "\t-T: location for tools+rumpmake.  default: PWD/obj/tooldir\n"
 	printf "\t-s: location of source tree.  default: PWD/src\n"
-	printf "\n"
+	echo
 	printf "\t-j: value of -j specified to make.  default: ${JNUM}\n"
 	printf "\t-q: quiet build, less compiler output.  default: noisy\n"
 	printf "\t-r: release build (no -g, DIAGNOSTIC, etc.).  default: no\n"
-	printf "\t-V: specify -V arguments to NetBSD build (expert-only)\n"
 	printf "\t-D: increase debugginess.  default: -O2 -g\n"
 	printf "\t-32: build 32bit binaries (if supported).  default: from cc\n"
 	printf "\t-64: build 64bit binaries (if supported).  default: from cc\n"
 	printf "\t-k: only kernel components (no hypercalls).  default: all\n"
-	printf "\t-N: emulate NetBSD, set -D__NetBSD__ etc.  default: nope\n"
+	printf "\t-N: emulate NetBSD, set -D__NetBSD__ etc.  default: no\n"
+	echo
+	printf "\t-H: ignore diagnostic checks (expert-only).  default: no\n"
+	printf "\t-V: specify -V arguments to NetBSD build (expert-only)\n"
 	echo
 	printf "supported commands (default => checkout+fullbuild+tests):\n"
 	printf "\tcheckoutgit:\tfetch NetBSD sources to srcdir from github\n"
@@ -81,7 +82,6 @@ helpme ()
 	printf "\tinstall:\tinstall rump kernel components into destdir\n"
 	printf "\ttests:\t\trun tests to verify installation is functional\n"
 	printf "\tfullbuild:\talias for \"tools build install\"\n"
-	printf "\tsetupdest:\tcreate destdirs (implicit for \"install\")\n"
 	exit 1
 }
 
@@ -92,7 +92,7 @@ helpme ()
 printoneconfig ()
 {
 
-	printf "%-5s %-18s: %s\n" "${1}" "${2}" "${3}"
+	[ -z "${2}" ] || printf "%-5s %-18s: %s\n" "${1}" "${2}" "${3}"
 }
 
 printenv ()
@@ -126,6 +126,14 @@ appendmkconf ()
 		printoneconfig "${1}" "${name}" "${val}"
 		echo "${3}${4}=${val}" >> "${MKCONF}"
 	fi
+}
+
+appendvar ()
+{
+
+	vname=${1}
+	shift
+	eval ${vname}="\"\${${vname}} \${*}\""
 }
 
 #
@@ -190,9 +198,20 @@ cctestW ()
 	echo 'no you_shall_not_compile' > broken.c
 	${CC} -W${1} broken.c > broken.out 2>&1
 	if ! grep -q "W${1}" broken.out ; then
-		EXTRA_CWARNFLAGS="${EXTRA_CWARNFLAGS} -W${1}"
+		appendvar EXTRA_CWARNFLAGS -W${1}
 	fi
 	rm -f broken.c broken.out
+}
+
+checkcheckout ()
+{
+
+	[ ! -z "${TARBALLMODE}" ] && return
+
+	if ! ${BRDIR}/checkout.sh checkcheckout ${SRCDIR} \
+	    && ! ${TITANMODE}; then
+		die 'revision mismatch, run checkout (or -H to override)'
+	fi
 }
 
 maketools ()
@@ -201,6 +220,13 @@ maketools ()
 	#
 	# Perform various checks and set values
 	#
+
+	checkcheckout
+
+	#
+	# does build.sh even exist, or is this just a kernel-only checkout?
+	#
+	[ -x "${SRCDIR}/build.sh" ] || die "Cannot find ${SRCDIR}/build.sh!"
 
 	# Check for variant of compiler.
 	# XXX: why can't all cc's that are gcc actually tell me
@@ -220,7 +246,7 @@ maketools ()
 	probeld
 
 	# Check for GNU/BSD ar
-	if ! ${AR} --version 2>/dev/null | egrep -q '(GNU|BSD) ar' ; then
+	if ! ${AR} -V 2>/dev/null | egrep -q '(GNU|BSD) ar' ; then
 		die Need GNU or BSD ar "(`type ${AR}`)"
 	fi
 
@@ -235,7 +261,7 @@ maketools ()
 	# since we need to testbuild kernel code, not host code,
 	# and we're only setting up the build now.  So we just
 	# disable format warnings on all 32bit targets.
-	${THIRTYTWO} && EXTRA_CWARNFLAGS="${EXTRA_CWARNFLAGS} -Wno-format"
+	${THIRTYTWO} && appendvar EXTRA_CWARNFLAGS -Wno-format
 
 	#
 	# Check if the linker supports all the features of the rump kernel
@@ -265,6 +291,12 @@ maketools ()
 	printf '#include <sys/ioctl.h>\n#include <unistd.h>\n
 int ioctl(int fd, int cmd, ...); int main() {return 0;}\n' > test.c
 	${CC} test.c >/dev/null 2>&1 && IOCTL_CMD_INT='-DHAVE_IOCTL_CMD_INT'
+	rm -f test.c a.out
+
+	# Check if cpp supports __COUNTER__.  If not, override CTASSERT
+	# to avoid line number conflicts
+	printf 'int a = __COUNTER__;\n' > test.c
+	${CC} -c test.c >/dev/null 2>&1 || CTASSERT="-D'CTASSERT(x)='"
 	rm -f test.c a.out
 
 	# the musl env usually does not contain linux kernel headers
@@ -318,6 +350,19 @@ int ioctl(int fd, int cmd, ...); int main() {return 0;}\n' > test.c
 		chmod 755 ${tname}
 	done
 
+	# Create bounce directory used as the install target.  The
+	# purpose of this is to strip the "usr/" pathname component
+	# that is hardcoded by NetBSD Makefiles.
+	mkdir -p ${BRTOOLDIR}/dest || die "cannot create ${BRTOOLDIR}/dest"
+	rm -f ${BRTOOLDIR}/dest/usr
+	ln -s ${DESTDIR} ${BRTOOLDIR}/dest/usr
+
+	# queue.h is not available on all systems, but we need it for
+	# the hypervisor build.  So, we make it available in tooldir.
+	mkdir -p ${BRTOOLDIR}/compat/include/sys \
+	    || die create ${BRTOOLDIR}/compat/include/sys
+	cp -p ${SRCDIR}/sys/sys/queue.h ${BRTOOLDIR}/compat/include/sys
+
 	# Create mk.conf.  Create it under a temp name first so as to
 	# not affect the tool build with its contents
 	MKCONF="${BRTOOLDIR}/mk.conf.building"
@@ -325,8 +370,8 @@ int ioctl(int fd, int cmd, ...); int main() {return 0;}\n' > test.c
 	> ${mkconf_final}
 
 	cat > "${MKCONF}" << EOF
-BUILDRUMP_CPPFLAGS=-I${DESTDIR}/include
-CPPFLAGS+=-I${OBJDIR}/compat/include
+BUILDRUMP_CPPFLAGS=-I\${BUILDRUMP_STAGE}/usr/include
+CPPFLAGS+=-I${BRTOOLDIR}/compat/include
 LIBDO.pthread=_external
 INSTPRIV=-U
 AFLAGS+=-Wa,--noexecstack
@@ -344,7 +389,6 @@ EOF
 	printoneconfig 'Cmd' "make -j[num]" "-j ${JNUM}"
 
 	if ${KERNONLY}; then
-		appendmkconf Cmd no MKPIC
 		appendmkconf Cmd yes RUMPKERN_ONLY
 	fi
 
@@ -356,6 +400,7 @@ EOF
 	fi
 	appendmkconf 'Probe' "${POSIX_MEMALIGN}" "CPPFLAGS" +
 	appendmkconf 'Probe' "${IOCTL_CMD_INT}" "CPPFLAGS" +
+	appendmkconf 'Probe' "${CTASSERT}" "CPPFLAGS" +
 	appendmkconf 'Probe' "${RUMP_VIRTIF}" "RUMP_VIRTIF"
 	appendmkconf 'Probe' "${EXTRA_CWARNFLAGS}" "CWARNFLAGS" +
 	appendmkconf 'Probe' "${EXTRA_LDFLAGS}" "LDFLAGS" +
@@ -376,6 +421,8 @@ EOF
 	appendmkconf 'Probe' "${MKSTATICLIB}"  "MKSTATICLIB"
 	appendmkconf 'Probe' "${MKPIC}"  "MKPIC"
 	appendmkconf 'Probe' "${MKSOFTFLOAT}"  "MKSOFTFLOAT"
+
+	printoneconfig 'Mode' "${TARBALLMODE}" 'yes'
 
 	printenv
 
@@ -402,9 +449,10 @@ EOF
 LIBCRT0=
 LIBCRTBEGIN=
 LIBCRTEND=
+LIBCRTI=
 LIBC=
 
-LDFLAGS+= -L${DESTDIR}/lib -Wl,-R${DESTDIR}/lib
+LDFLAGS+= -L\${BUILDRUMP_STAGE}/usr/lib -Wl,-R${DESTDIR}/lib
 LDADD+= ${EXTRA_RUMPCOMMON} ${EXTRA_RUMPUSER} ${EXTRA_RUMPCLIENT}
 EOF
 		[ ${LD_FLAVOR} != 'sun' ] \
@@ -424,23 +472,13 @@ EOF
 	# The html pages would be nice, but result in too many broken
 	# links, since they assume the whole NetBSD man page set to be present.
 	cd ${SRCDIR}
-	env CFLAGS= HOST_LDFLAGS=-L${OBJDIR} ./build.sh -m ${MACHINE} -u \
-	    -D ${OBJDIR}/dest -w ${RUMPMAKE} \
-	    -T ${BRTOOLDIR} -j ${JNUM} \
-	    ${LLVM} ${BEQUIET} ${LDSCRIPT} \
-	    ${TRAVIS:+-E} \
-	    -Z S \
-	    -V EXTERNAL_TOOLCHAIN=${BRTOOLDIR} -V TOOLCHAIN_MISSING=yes \
-	    -V TOOLS_BUILDRUMP=yes \
-	    -V MKGROFF=no \
-	    -V MKLINT=no \
-	    -V MKDYNAMICROOT=no \
-	    -V TOPRUMP="${SRCDIR}/sys/rump" \
-	    -V MAKECONF="${mkconf_final}" \
-	    -V MAKEOBJDIR="\${.CURDIR:C,^(${SRCDIR}|${BRDIR}),${OBJDIR},}" \
-	    ${BUILDSH_VARGS} \
-	  tools
-	[ $? -ne 0 ] && die build.sh tools failed
+
+	# create user-usable wrapper script
+	makemake ${BRTOOLDIR}/rumpmake ${BRTOOLDIR}/dest makewrapper
+
+	# create wrapper script to be used during buildrump.sh, plus tools
+	makemake ${RUMPMAKE} ${OBJDIR}/dest.stage tools
+
 	unset ac_cv_header_zlib_h
 
 	# tool build done.  flip mk.conf name so that it gets picked up
@@ -450,15 +488,44 @@ EOF
 	unset omkconf mkconf_final
 }
 
+makemake ()
+{
+
+	wrapper=$1
+	stage=$2
+	cmd=$3
+
+	env CFLAGS= HOST_LDFLAGS=-L${OBJDIR} ./build.sh -m ${MACHINE} -u \
+	    -D ${stage} -w ${wrapper} \
+	    -T ${BRTOOLDIR} -j ${JNUM} \
+	    ${LLVM} ${BEQUIET} ${LDSCRIPT} \
+	    -E -Z S \
+	    -V EXTERNAL_TOOLCHAIN=${BRTOOLDIR} -V TOOLCHAIN_MISSING=yes \
+	    -V TOOLS_BUILDRUMP=yes \
+	    -V MKGROFF=no \
+	    -V MKLINT=no \
+	    -V MKZFS=no \
+	    -V MKDYNAMICROOT=no \
+	    -V TOPRUMP="${SRCDIR}/sys/rump" \
+	    -V MAKECONF="${mkconf_final}" \
+	    -V MAKEOBJDIR="\${.CURDIR:C,^(${SRCDIR}|${BRDIR}),${OBJDIR},}" \
+	    -V BUILDRUMP_STAGE=${stage} \
+	    ${BUILDSH_VARGS} \
+	${cmd}
+	[ $? -ne 0 ] && die build.sh ${cmd} failed
+}
+
 makebuild ()
 {
+
+	checkcheckout
 
 	# ensure we're in SRCDIR, in case "tools" wasn't run
 	cd ${SRCDIR}
 
 	printenv
 
-	targets=$*
+	targets="obj includes dependall install"
 
 	#
 	# Building takes 4 passes, just like when
@@ -475,24 +542,23 @@ makebuild ()
 	    sys/rump/dev sys/rump/fs sys/rump/kern sys/rump/net
 	    sys/rump/include ${BRDIR}/brlib"
 
-	if [ ${MACHINE} != "sparc" -a ${MACHINE} != "sparc64" \
-	  -a ${MACHINE} != "mipsel" -a ${MACHINE} != "mipsel64" \
-	  -a ${MACHINE} != "mipseb" -a ${MACHINE} != "mipseb64" ]; then
-		DIRS_third="${DIRS_third} sys/rump/kern/lib/libsys_linux"
+	if [ ${MACHINE} != "sparc" -a ${MACHINE} != "sparc64" ]; then
+		DIRS_emul=sys/rump/kern/lib/libsys_linux
 	fi
+
+	if [ ${TARGET} = "sunos" ]; then
+		DIRS_emul="${DIRS_emul} sys/rump/kern/lib/libsys_sunos"
+	fi
+
+	DIRS_third="${DIRS_third} ${DIRS_emul}"
 
 	if [ ${TARGET} = "linux" -o ${TARGET} = "netbsd" ]; then
 		DIRS_final="lib/librumphijack"
 	fi
 
-	if [ ${TARGET} = "sunos" ]; then
-		DIRS_third="${DIRS_third} sys/rump/kern/lib/libsys_sunos"
-	fi
-
 	if ${KERNONLY}; then
-		mkmakefile ${OBJDIR}/Makefile.incs \
-		    ${DIRS_first} ${DIRS_second} ${DIRS_third}
-		mkmakefile ${OBJDIR}/Makefile.all ${DIRS_second} ${DIRS_third}
+		mkmakefile ${OBJDIR}/Makefile.all \
+		    sys/rump ${DIRS_emul} ${BRDIR}/brlib
 	else
 		DIRS_third="lib/librumpclient ${DIRS_third}"
 
@@ -507,30 +573,33 @@ makebuild ()
 	# try to minimize the amount of domake invocations.  this makes a
 	# difference especially on systems with a large number of slow cores
 	for target in ${targets}; do
-		if ${KERNONLY}; then
-			if [ ${target} = "includes" ]; then
-				domake ${OBJDIR}/Makefile.incs ${target}
-			else
-				domake ${OBJDIR}/Makefile.all ${target}
-			fi
+		if [ ${target} = "dependall" ] && ! ${KERNONLY}; then
+			domake ${OBJDIR}/Makefile.first ${target}
+			domake ${OBJDIR}/Makefile.second ${target}
+			domake ${OBJDIR}/Makefile.third ${target}
+			domake ${OBJDIR}/Makefile.final ${target}
 		else
-			if [ ${target} = "dependall" ]; then
-				domake ${OBJDIR}/Makefile.first ${target}
-				domake ${OBJDIR}/Makefile.second ${target}
-				domake ${OBJDIR}/Makefile.third ${target}
-				domake ${OBJDIR}/Makefile.final ${target}
-			else
-				domake ${OBJDIR}/Makefile.all ${target}
-			fi
+			domake ${OBJDIR}/Makefile.all ${target}
 		fi
 	done
 
 	if ! ${KERNONLY}; then
-		mkmakefile ${OBJDIR}/Makefile.utils usr.bin/rump_server
+		mkmakefile ${OBJDIR}/Makefile.utils \
+		    usr.bin/rump_server usr.bin/rump_allserver \
+		    usr.bin/rump_wmd
 		for target in ${targets}; do
 			domake ${OBJDIR}/Makefile.utils ${target}
 		done
 	fi
+}
+
+makeinstall ()
+{
+
+	# ensure we run this in a directory that does not have a
+	# Makefile that could confuse rumpmake
+	stage=$(cd ${BRTOOLDIR} && ${RUMPMAKE} -V '${BUILDRUMP_STAGE}')
+	(cd ${stage}/usr ; tar -cf - .) | (cd ${DESTDIR} ; tar -xf -)
 }
 
 evaltools ()
@@ -580,6 +649,9 @@ evaltools ()
 	*-dragonflybsd)
 		TARGET=dragonfly
 		;;
+	*-openbsd*)
+		TARGET=openbsd
+		;;
 	*-freebsd*)
 		TARGET=freebsd
 		;;
@@ -596,16 +668,22 @@ evaltools ()
 		TARGET=unknown
 		;;
 	esac
+
+	# check if we're running from a tarball, i.e. is checkout possible
+	BRDIR=$(dirname $0)
+	unset TARBALLMODE
+	if [ ! -f "${BRDIR}/checkout.sh" -a -f "${BRDIR}/tarup-gitdate" ]; then
+		TARBALLMODE='Run from tarball'
+	fi
 }
 
 parseargs ()
 {
 
 	DBG='-O2 -g'
-	ANYTARGETISGOOD=false
+	TITANMODE=false
 	NOISE=2
 	debugginess=0
-	BRDIR=$(dirname $0)
 	THIRTYTWO=false
 	SIXTYFOUR=false
 	KERNONLY=false
@@ -644,7 +722,7 @@ parseargs ()
 			[ ${debugginess} -gt 2 ] && RUMP_LOCKDEBUG=1
 			;;
 		H)
-			ANYTARGETISGOOD=true
+			TITANMODE=true
 			;;
 		k)
 			KERNONLY=true
@@ -672,7 +750,7 @@ parseargs ()
 			BRTOOLDIR=${OPTARG}
 			;;
 		V)
-			BUILDSH_VARGS="${BUILDSH_VARGS} -V ${OPTARG}"
+			appendvar BUILDSH_VARGS -V ${OPTARG}
 			;;
 		-)
 			break
@@ -684,6 +762,8 @@ parseargs ()
 	done
 	shift $((${OPTIND} - 1))
 
+	DBG="${BUILDRUMP_DBG:-${DBG}}"
+
 	BEQUIET="-N${NOISE}"
 	[ -z "${BRTOOLDIR}" ] && BRTOOLDIR=${OBJDIR}/tooldir
 
@@ -691,8 +771,12 @@ parseargs ()
 	# Determine what which parts we should execute.
 	#
 	allcmds='checkout checkoutcvs checkoutgit tools build install
-	    tests fullbuild setupdest'
+	    tests fullbuild'
 	fullbuildcmds="tools build install"
+
+	# for compat, so that previously valid invocations don't
+	# produce an error
+	allcmds="${allcmds} setupdest"
 
 	for cmd in ${allcmds}; do
 		eval do${cmd}=false
@@ -710,7 +794,7 @@ parseargs ()
 			done
 		done
 	else
-		docheckoutgit=true
+		[ -z "${TARBALLMODE}" ] && docheckoutgit=true
 		dofullbuild=true
 		dotests=true
 	fi
@@ -727,6 +811,13 @@ parseargs ()
 	if ${docheckoutcvs} ; then
 		docheckout=true
 		checkoutstyle=cvs
+	fi
+
+	# sanity checks
+	if [ ! -z "${TARBALLMODE}" ]; then
+		${docheckout} && \
+		    die 'Checkout not possible in tarball mode, fetch repo'
+		[ -d "${SRCDIR}" ] || die 'Sources not found from tarball'
 	fi
 }
 
@@ -755,7 +846,19 @@ resolvepaths ()
 	abspath BRTOOLDIR
 	abspath SRCDIR
 
-	RUMPMAKE="${BRTOOLDIR}/rumpmake"
+	RUMPMAKE="${BRTOOLDIR}/_buildrumpsh-rumpmake"
+
+	# mini-mtree
+	dstage=${OBJDIR}/dest.stage/usr
+	for dir in ${dstage}/bin ${dstage}/include/rump ${dstage}/lib; do
+		mkdir -p ${dir} || die "Cannot create ${dir}"
+	done
+	for man in cat man ; do
+		for x in 1 2 3 4 5 6 7 8 9 ; do
+			mkdir -p ${dstage}/share/man/${man}${x} \
+			    || die create ${dstage}/share/man/${man}${x}
+		done
+	done
 }
 
 check64 ()
@@ -809,13 +912,18 @@ evaltarget ()
 	"dragonfly")
 		RUMPKERN_UNDEF='-U__DragonFly__'
 		;;
+	"openbsd")
+		RUMPKERN_UNDEF='-U__OpenBSD__'
+		${KERNONLY} || EXTRA_RUMPCLIENT='-lpthread'
+		appendvar EXTRA_CWARNFLAGS -Wno-bounded -Wno-format
+		;;
 	"freebsd")
 		RUMPKERN_UNDEF='-U__FreeBSD__'
+		${KERNONLY} || EXTRA_RUMPCLIENT='-lpthread'
 		;;
 	"linux")
 		RUMPKERN_UNDEF='-Ulinux -U__linux -U__linux__ -U__gnu_linux__'
-		cppdefines _BIG_ENDIAN \
-		    && RUMPKERN_UNDEF="${RUMPKERN_UNDEF} -U_BIG_ENDIAN"
+		cppdefines _BIG_ENDIAN && appendvar RUMPKERN_UNDEF -U_BIG_ENDIAN
 		${KERNONLY} || EXTRA_RUMPCOMMON='-ldl'
 		${KERNONLY} || EXTRA_RUMPUSER='-lrt'
 		${KERNONLY} || EXTRA_RUMPCLIENT='-lpthread'
@@ -830,7 +938,7 @@ evaltarget ()
 
 		# I haven't managed to get static libs to work on Solaris,
 		# so just be happy with shared ones
-		${KERNONLY} || MKSTATICLIB=no
+		MKSTATICLIB=no
 		;;
 	"cygwin")
 		MKPIC=no
@@ -842,11 +950,11 @@ evaltarget ()
 	esac
 
 	if ! ${target_supported:-true}; then
-		${ANYTARGETISGOOD} || die unsupported target OS: ${TARGET}
+		${TITANMODE} || die unsupported target OS: ${TARGET}
 	fi
 
 	if ! cppdefines __ELF__; then
-		${ANYTARGETISGOOD} || die ELF required as target object format
+		${TITANMODE} || die ELF required as target object format
 	fi
 
 	# decide 32/64bit build.  step one: probe compiler default
@@ -860,12 +968,12 @@ evaltarget ()
 	if ${THIRTYTWO} && [ "${ccdefault}" -ne 32 ] ; then
 		echo 'int main() {return 0;}' | ${CC} ${EXTRA_CFLAGS} -o /dev/null -x c - \
 		    ${EXTRA_RUMPUSER} ${EXTRA_RUMPCOMMON} > /dev/null 2>&1
-		[ $? -eq 0 ] || ${ANYTARGETISGOOD} || \
+		[ $? -eq 0 ] || ${TITANMODE} || \
 		    die 'Gave -32, but probe shows it will not work.  Try -H?'
 	elif ${SIXTYFOUR} && [ "${ccdefault}" -ne 64 ] ; then
 		echo 'int main() {return 0;}' | ${CC} ${EXTRA_CFLAGS} -o /dev/null -x c - \
 		    ${EXTRA_RUMPUSER} ${EXTRA_RUMPCOMMON} > /dev/null 2>&1
-		[ $? -eq 0 ] || ${ANYTARGETISGOOD} || \
+		[ $? -eq 0 ] || ${TITANMODE} || \
 		    die 'Gave -64, but probe shows it will not work.  Try -H?'
 	else
 		# not specified.  use compiler default
@@ -935,7 +1043,7 @@ evaltarget ()
 		fi
 		probemips
 		;;
-	"mips64eb")
+	"mips64")
 		if ${THIRTYTWO} ; then
 			MACHINE="evbmips-eb"
 			MACH_ARCH="mipseb"
@@ -959,10 +1067,10 @@ evaltarget ()
 		EXTRA_AFLAGS='-fPIC -D_FILE_OFFSET_BITS=64 -D__mips_o32'
 		probemips
 		;;
-	"mipseb")
+	"mips")
 		check64
 		MACHINE="evbmips-eb"
-		MACH_ARVH="mipseb"
+		MACH_ARCH="mipseb"
 		EXTRA_CFLAGS='-fPIC -D_FILE_OFFSET_BITS=64 -D__mips_o32'
 		EXTRA_AFLAGS='-fPIC -D_FILE_OFFSET_BITS=64 -D__mips_o32'
 		probemips
@@ -993,42 +1101,6 @@ evaltarget ()
 	[ -z "${MACHINE}" ] && die script does not know machine \"${MACH_ARCH}\"
 }
 
-setupdest ()
-{
-
-	# nuke symlink farm first, avoids link resolution surprises in rebuilds
-	rm -rf ${OBJDIR}/dest
-
-	# set up $dest via symlinks.  this is easier than trying to teach
-	# the NetBSD build system that we're not interested in an extra
-	# level of "usr"
-	mkdir -p ${DESTDIR}/include/rump || die create ${DESTDIR}/include/rump
-	mkdir -p ${DESTDIR}/lib || die create ${DESTDIR}/lib
-	mkdir -p ${DESTDIR}/bin || die create ${DESTDIR}/bin
-	mkdir -p ${OBJDIR}/dest/usr/share/man \
-	    || die create ${OBJDIR}/dest/usr/share/man
-	ln -sf ${DESTDIR}/include ${OBJDIR}/dest/usr/
-	ln -sf ${DESTDIR}/lib ${OBJDIR}/dest/usr/
-	ln -sf ${DESTDIR}/bin ${OBJDIR}/dest/usr/bin
-	ln -sf ${DESTDIR}/bin ${OBJDIR}/dest/usr/sbin
-	for man in cat man ; do 
-		for x in 1 2 3 4 5 6 7 8 9 ; do
-			mkdir -p ${DESTDIR}/share/man/${man}${x} \
-			    || die create ${DESTDIR}/share/man/${man}${x}
-			ln -sf ${DESTDIR}/share/man/${man}${x} \
-			    ${OBJDIR}/dest/usr/share/man/
-		done
-	done
-
-	# queue.h is not available on all systems, but we need it for
-	# the hypervisor build.  Copy queue.h from the NetBSD sources
-	# into DESTDIR so that it's available for the hypervisor build
-	# on all hosts.
-	mkdir -p ${OBJDIR}/compat/include/sys \
-	    || die create ${OBJDIR}/compat/include/sys
-	cp -p ${SRCDIR}/sys/sys/queue.h ${OBJDIR}/compat/include/sys
-}
-
 # create the makefiles used for building
 mkmakefile ()
 {
@@ -1049,7 +1121,7 @@ mkmakefile ()
 		esac
 	done
 
-	printf '\n\n.include <bsd.subdir.mk>\n'
+	printf '\n.include <bsd.subdir.mk>\n'
 	exec 1>&3 3>&-
 }
 
@@ -1079,18 +1151,9 @@ evaltarget
 
 resolvepaths
 
-if ${dobuild} || ${doinstall}; then
-	# build implies we need a dest
-	dosetupdest=true
-fi
-${dosetupdest} && setupdest
-
 ${dotools} && maketools
-
-targets=''
-${dobuild} && targets="obj includes dependall"
-${doinstall} && targets="${targets} install"
-[ ! -z "${targets}" ] && makebuild ${targets}
+${dobuild} && makebuild
+${doinstall} && makeinstall
 
 if ${dotests}; then
 	if ${KERNONLY}; then

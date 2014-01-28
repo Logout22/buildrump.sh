@@ -39,50 +39,76 @@
 # 3) push rumpkernel-netbsd-src
 # 4) push buildrump.sh
 #
-NBSRC_CVSDATE="20130923 1600UTC"
-NBSRC_CVSFLAGS="-z3 \
-    -d ${BUILDRUMP_CVSROOT:-:pserver:anoncvs@anoncvs.netbsd.org:/cvsroot}"
+# The rationale for the procedure is to prevent "race conditions"
+# where cvs/git can offer different checkouts and also to make sure
+# that once buildrump.sh is published, the NetBSD sources will be
+# available via git.
+#
+: ${BUILDRUMP_CVSROOT:=:pserver:anoncvs@anoncvs.netbsd.org:/cvsroot}
+NBSRC_CVSDATE="20140103 1400UTC"
+NBSRC_CVSFLAGS="-z3 -d ${BUILDRUMP_CVSROOT}"
 
 # If set, timestamp for src/sys/rump/listsrcdir.  If unset,
 # NBSRC_CVSDATE is used.
-NBSRC_LISTDATE="20131029 1620UTC"
+#NBSRC_LISTDATE="20131029 1620UTC"
 
 # Cherry-pick patches are not in $NBSRC_CVSDATE
 # the format is "date1:dir1 dir2 dir3 ...;date2:dir 4..."
 NBSRC_EXTRA='
-    20130923 1800UTC:
-	src/sys/rump/include/sys/bus.h;
-    20131027 2030UTC:
-	src/sys/rump/net/lib/libvirtif/rumpcomp_user.h
-	src/sys/rump/librump/rumpkern/lwproc.c
-	src/sys/rump/librump/rumpkern/rump_private.h;
-    20131101 2323UTC:
-	src/lib/librumpuser/rumpuser_dl.c
-	src/lib/librumpuser/rumpuser_sp.c;
-    20131111 2312UTC:
-	src/sys/rump/librump/rumpkern/intr.c;
-    20131113 1748UTC:
-	src/sys/rump/include/rump/rumpdefs.h
-	src/usr.bin/rump_server
-	src/usr.bin/rump_allserver;
-    20131118 2000UTC:
-	src/sys/rump/librump/rumpkern/rump.c'
+    20140104 1420UTC:
+	src/sys/netinet/udp_usrreq.c;
+    20140108 0150UTC:
+	src/lib/librumpuser;
+    20140108 1200UTC:
+	src/sys/rump/net/lib/libshmif/rumpcomp_user.c;
+    20140128 1100UTC:
+	src/usr.bin/rump_wmd
+	src/sys/compat/linux
+	src/sys/rump/kern/lib/libsys_linux'
 
-GITREPO='https://github.com/anttikantee/rumpkernel-netbsd-src'
-GITREPOPUSH='git@github.com:anttikantee/rumpkernel-netbsd-src'
+GITREPO='https://github.com/rumpkernel/rumpkernel-netbsd-src'
+GITREPOPUSH='git@github.com:rumpkernel/rumpkernel-netbsd-src'
 GITREVFILE='.srcgitrev'
 
 die ()
 {
 
+	echo '>>'
 	echo ">> $*"
+	echo '>>'
 	exit 1
 }
 
 checkoutcvs ()
 {
 
-	echo ">> Fetching NetBSD sources to ${SRCDIR} using cvs"
+	case $1 in
+	-r|-D)
+		NBSRC_CVSPARAM=$1
+		shift
+		NBSRC_CVSREV=$*
+		NBSRC_CVSLISTREV=$*
+		NBSRC_EXTRA=''
+		;;
+	HEAD)
+		NBSRC_CVSPARAM=''
+		NBSRC_CVSREV=''
+		NBSRC_CVSLISTREV=''
+		NBSRC_EXTRA=''
+		;;
+	'')
+		NBSRC_CVSPARAM=-D
+		NBSRC_CVSREV="${NBSRC_CVSDATE}"
+		NBSRC_CVSLISTREV="${NBSRC_LISTDATE:-${NBSRC_CVSDATE}}"
+		;;
+	default)
+		die 'Invalid parameters to checkoutcvs'
+		;;
+	esac
+		
+
+	echo ">> Fetching NetBSD sources to ${SRCDIR} using CVS"
+	echo ">> BUILDRUMP_CVSROOT is \"${BUILDRUMP_CVSROOT}\""
 
 	: ${CVS:=cvs}
 	if ! type ${CVS} >/dev/null 2>&1 ;then
@@ -99,9 +125,10 @@ checkoutcvs ()
 
 	# we need listsrcdirs
 	echo ">> Fetching the list of files we need to checkout ..."
-	${CVS} ${NBSRC_CVSFLAGS} co -p -D "${NBSRC_LISTDATE:-${NBSRC_CVSDATE}}"\
+	${CVS} ${NBSRC_CVSFLAGS} co -p \
+	    ${NBSRC_CVSPARAM} ${NBSRC_CVSLISTREV:+"${NBSRC_CVSLISTREV}"} \
 	    src/sys/rump/listsrcdirs > listsrcdirs 2>/dev/null \
-	    || die listsrcdirs checkout failed
+	      || die listsrcdirs checkout failed
 
 	# trick cvs into "skipping" the module name so that we get
 	# all the sources directly into $SRCDIR
@@ -113,7 +140,8 @@ checkoutcvs ()
 	echo "   "`pwd -P`
 	echo '>> This will take a few minutes and requires ~200MB of disk space'
 	sh listsrcdirs -c | xargs ${CVS} ${NBSRC_CVSFLAGS} co -P \
-	    -D "${NBSRC_CVSDATE}" || die checkout failed
+	    ${NBSRC_CVSPARAM} ${NBSRC_CVSREV:+"${NBSRC_CVSREV}"} \
+	      || die checkout failed
 
 	IFS=';'
 	for x in ${NBSRC_EXTRA}; do
@@ -160,7 +188,7 @@ checkoutgit ()
 		cd ${SRCDIR}
 	fi
 
-	${GIT} checkout ${gitrev} || \
+	${GIT} checkout -q ${gitrev} || \
 	    die 'Could not checkout correct git revision. Wrong repo?'
 }
 
@@ -178,7 +206,6 @@ githubdate ()
 
 	${GIT} clone -n -b netbsd-cvs ${GITREPOPUSH} ${SRCDIR}
 
-	echo '>> checking out source tree via anoncvs'
 	# checkoutcvs does cd to SRCDIR
 	curdir="$(pwd)"
 	checkoutcvs
@@ -199,6 +226,62 @@ githubdate ()
 	set +e
 }
 
+checkcheckout ()
+{
+
+	# if it's not a git repo, don't bother
+	if [ ! -e "${SRCDIR}/.git" ]; then
+		echo '>>'
+		echo ">> NOTICE: Not a git repo in ${SRCDIR}"
+		echo '>> Cannot verify repository version.  Proceeding ...'
+		echo '>>'
+		return 0
+	fi
+
+	setgit
+
+	# if it's a git repo of the wrong version, issue an error
+	# (caller can choose to ignore it if they so desire)
+	gitrev_wanted=$(cat ${BRDIR}/${GITREVFILE})
+	gitrev_actual=$( (cd ${SRCDIR} && ${GIT} rev-parse HEAD))
+	if [ "${gitrev_wanted}" != "${gitrev_actual}" ]; then
+		echo '>>'
+		echo ">> ${SRCDIR} contains the wrong repo revision"
+		echo '>> Did you forget to run checkout?'
+		echo '>>'
+		return 1
+	fi
+
+	# if it's an unclean git repo, issue a warning
+	if [ ! -z "$( (cd ${SRCDIR} && ${GIT} status --porcelain))" ]; then
+		echo '>>'
+		echo ">> WARNING: repository in ${SRCDIR} is not clean"
+		echo '>>'
+		return 0
+	fi
+
+	return 0
+}
+
+listdates ()
+{
+
+	echo '>> Base date for NetBSD sources:'
+	echo '>>' ${NBSRC_CVSDATE}
+	[ -z "${NBSRC_EXTRA}" ] || printf '>>\n>> Overrides:\n'
+	IFS=';'
+	for x in ${NBSRC_EXTRA}; do
+		IFS=':'
+		set -- ${x}
+		unset IFS
+		date=${1}
+		dirs=${2}
+		echo '>>'
+		echo '>> Date: ' ${date}
+		echo '>> Files:' ${dirs}
+	done
+}
+
 setgit ()
 {
 
@@ -210,13 +293,16 @@ setgit ()
 	fi
 }
 
-[ $# -ne 2 ] && die Invalid usage.  Run this script via buildrump.sh
+[ "$1" = "listdates" ] && { listdates ; exit 0; }
+
+[ $# -lt 2 ] && die Invalid usage.  Run this script via buildrump.sh
 BRDIR=$(dirname $0)
 SRCDIR=${2}
 
 case "${1}" in
 cvs)
-	checkoutcvs
+	shift ; shift
+	checkoutcvs $*
 	echo '>> checkout done'
 	;;
 git)
@@ -234,8 +320,12 @@ githubdate)
 	echo ">> REMEMBER TO PUSH ${SRCDIR}"
 	echo '>>'
 	;;
+checkcheckout)
+	checkcheckout
+	exit $?
+	;;
 *)
-	die Invalid usage.  Run this script via buildrump.sh
+	die Invalid command \"$1\".  Run this script via buildrump.sh
 	;;
 esac
 

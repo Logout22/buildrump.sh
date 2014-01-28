@@ -9,12 +9,12 @@ TESTOBJ=${OBJDIR}/brtests
 dosimpleclient ()
 {
 
-	echo Remote communication
+	printf 'Remote communication ... '
 	export RUMP_SERVER="unix://mysocket"
 	${DESTDIR}/bin/rump_server "${RUMP_SERVER}" || die rump_server failed
 	./simpleclient || die simpleclient failed
 	unset RUMP_SERVER
-	echo Done
+	echo done
 }
 
 doinit ()
@@ -36,27 +36,37 @@ dofstest ()
 dofstest_img ()
 {
 
-	echo VFS test with actual fs
+	printf 'VFS test with actual file system ... '
 	./fstest2 ${TESTDIR}/fstest_img || die fstest2 failed
-	echo Done
+	echo done
 }
 
 donettest_simple ()
 {
 
-	echo Networking test
+	printf 'IPv4 networking test ... '
 	rm -f busmem
 	./nettest_simple server || die nettest server failed
 	./nettest_simple client || die nettest client failed
-	echo Done
+	echo done
+}
+
+donettest_simple6 ()
+{
+
+	printf 'IPv6 networking test ... '
+	rm -f busmem
+	./nettest_simple6 server6 || die nettest server6 failed
+	./nettest_simple6 client6 || die nettest client6 failed
+	echo done
 }
 
 donettest_routed ()
 {
 
-	echo Routed networking test
+	printf 'Routed IPv4 networking test ... '
 
-	rm -f net1 net2
+	rm -f busmem1 busmem2
 	./nettest_routed server || die nettest server failed
 	./nettest_routed router unix://routerctrl || die router fail
 	./nettest_routed client || die nettest client failed
@@ -64,11 +74,28 @@ donettest_routed ()
 	# "code reuse ;)"
 	export RUMP_SERVER="unix://routerctrl"
 	${TESTOBJ}/simpleclient/simpleclient || die failed to reboot router
-
-	echo Done
+	echo done
 }
 
-ALLTESTS="init fstest fstest_img simpleclient nettest_simple nettest_routed"
+donettest_routed6 ()
+{
+
+	printf 'Routed IPv6 networking test ... '
+
+	rm -f busmem1 busmem2
+	./nettest_routed6 server6 || die nettest server failed
+	./nettest_routed6 router6 unix://routerctrl || die router fail
+	./nettest_routed6 client6 || die nettest client failed
+
+	# "code reuse ;)"
+	export RUMP_SERVER="unix://routerctrl"
+	${TESTOBJ}/simpleclient/simpleclient || die failed to reboot router
+	echo done
+}
+
+ALLTESTS="init fstest fstest_img simpleclient
+	nettest_simple nettest_simple6 nettest_routed nettest_routed6"
+
 alltests ()
 {
 
@@ -81,16 +108,19 @@ alltests ()
 		echo '>>'
 	fi
 
+	mkdir -p ${TESTOBJ} || die cannot create object directory
+
 	failed=0
+	extradep=${TESTOBJ}/.testrumpdepend
+	touch ${extradep}
 	for test in ${ALLTESTS}; do
 		TO=${TESTOBJ}/${test}
 		(
 			cd ${TESTDIR}/${test}
-			${RUMPMAKE} MAKEOBJDIR=${TO} obj
-			${RUMPMAKE} MAKEOBJDIR=${TO} dependall
-		)
-
-		( cd ${TO} ; do${test} )
+			${RUMPMAKE} MAKEOBJDIR=${TO} obj || exit 1
+			${RUMPMAKE} MAKEOBJDIR=${TO} DPSRCS=${extradep} \
+			     dependall || exit 1
+		) && ( cd ${TO} ; do${test} )
 		failed=$(( ${failed} + $? ))
 	done
 	[ ${failed} -ne 0 ] && die "FAILED ${failed} tests!"
