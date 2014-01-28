@@ -90,7 +90,7 @@ static int handle_arp(void *packet, bool outgoing) {
                     return FRAME_TO_TAP;
                 }
             } else if (outgoing) {
-                return FRAME_TO_ALL;
+                return FRAME_TO_TAP;
             }
         } else if (op == 2) {
             //handle ARP reply
@@ -247,6 +247,9 @@ int pass_for_frame(void *frame, int srcbus_id, bool outgoing) {
                     /* make sure packets are not re-sent: */
                     !(outgoing && !EQIP(&pktipm.ipm_sender, &ip_address))) {
                     // TODO add broadcast/multicast/... addresses
+                    //FIXME dirty hack, replace ASAP
+                    uint8_t custommac[] = {0xB2, 0xA0, 0x30, 0xC8, 0x82, 0xC2};
+                    CPYMAC(frame, custommac);
                     pass = pass_for_port_local(
                             srcbus_id,
                             pktcd.cd_source_port,
