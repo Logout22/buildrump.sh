@@ -49,8 +49,10 @@
 #include "hive.h"
 #include "shmifvar.h"
 
-#define IP_ADDRESS "10.93.48.100"
+#define IP_ADDRESS "10.93.49.100"
 in_addr_t ip_addr_num;
+uint8_t mac_addr[MAC_LEN];
+bool dbg_dieafter = false;
 
 //defining some BSD specific macros
 #include <stddef.h>
@@ -124,7 +126,7 @@ void deallocate_bus(gpointer dataptr) {
     if (busptr->tmpbus_hdl) {
         close(busptr->tmpbus_hdl);
         // should be left for debugging purposes:
-        unlink(busptr->tmpbus_name);
+        //unlink(busptr->tmpbus_name);
     }
     free(busptr->tmpbus_position);
     free(busptr);
@@ -202,6 +204,13 @@ int tun_alloc(char *dev)
      close(fd);
      return err;
   }
+
+  if ((err = ioctl(fd, SIOCGIFHWADDR, &ifr)) < 0) {
+      close(fd);
+      return err;
+  }
+  CPYMAC(mac_addr, ifr.ifr_hwaddr.sa_data);
+
   strcpy(dev, ifr.ifr_name);
   return fd;
 }
@@ -265,6 +274,7 @@ shmif_unlockbus(struct shmif_mem *busmem)
 	uint32_t old = compare_exchange(&busmem->shm_lock,
                 LOCK_LOCKED, LOCK_UNLOCKED);
     assert(old == LOCK_LOCKED);
+    assert(busmem->shm_lock == LOCK_UNLOCKED);
 }
 
 int initbus(struct tmpbus *newbus) {
@@ -494,7 +504,7 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
                     struct tmpbus *destbus = (struct tmpbus*)
                         g_hash_table_lookup(busses, GINT_TO_POINTER(pass));
                     if (!destbus) {
-                        ERR("Invalid bus at ID %d\n", pass);
+                        ERR("busread: Invalid bus at ID %d\n", pass);
                         die(225, NULL);
                     }
                     writebus(destbus, packet, pkthdr.sp_len);
@@ -512,17 +522,23 @@ void handle_tapread(evutil_socket_t sockfd, short events, void *ignore) {
     ssize_t pktlen;
     while ((pktlen = read(tapfd, readbuf, bufsize)) > 0) {
         int pass = pass_for_frame(readbuf, INVALID_BUS, false);
-        if (pass == FRAME_TO_ALL) {
+        if (pass == FRAME_TO_TAP) {
+            write(tapfd, readbuf, pktlen);
+        } else if (pass == FRAME_TO_ALL) {
+            printf("here\n");
             send_frame_to_all(readbuf, pktlen);
         } else if (pass != DROP_FRAME) {
             struct tmpbus *destbus = (struct tmpbus*)
                 g_hash_table_lookup(busses, GINT_TO_POINTER(pass));
             if (!destbus) {
-                ERR("Invalid bus at ID %d\n", pass);
+                ERR("tapread: Invalid bus at ID %d\n", pass);
                 die(226, NULL);
             }
             writebus((struct tmpbus*) destbus,
                     readbuf, pktlen);
+        }
+        if (dbg_dieafter) {
+            die(0, "DEBUG died as requested");
         }
     }
 }
@@ -613,18 +629,6 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
         die(errno, "init tmpbus");
     }
 
-    // now answer the client with the bus file name
-    if ((res = reply_swarm_getshm(
-                fd, ip_addr_num, newbus->tmpbus_name))) {
-        deallocate_bus(newbus);
-        ERR("Error replying the client side: %d\n", -res);
-        close(fd);
-        return;
-    }
-
-    //TODO proper ordering
-    sleep(5);
-
     ERR("Add new event\n");
     int new_wd = inotify_add_watch(
             inotify_hdl, newbus->tmpbus_name, IN_MODIFY | IN_CLOSE_WRITE);
@@ -642,6 +646,18 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
     }
     event_add(newbus->tmpbus_event, NULL);
 
+    //TODO proper ordering
+    //sleep(5);
+
+    // now answer the client with the bus file name
+    if ((res = reply_swarm_getshm(
+                fd, ip_addr_num, newbus->tmpbus_name))) {
+        deallocate_bus(newbus);
+        ERR("Error replying the client side: %d\n", -res);
+        close(fd);
+        return;
+    }
+
     g_hash_table_insert(
             busses, GINT_TO_POINTER(new_wd), newbus);
 }
@@ -653,9 +669,6 @@ int main(int argc, char *argv[]) {
     };
     sigaction(SIGINT, &sigact, NULL);
     sigaction(SIGTERM, &sigact, NULL);
-
-    ip_addr_num = inet_addr(IP_ADDRESS);
-    init_hive(ip_addr_num);
 
     //can eventually be disabled
     event_enable_debug_mode();
@@ -675,23 +688,9 @@ int main(int argc, char *argv[]) {
         tapfd = 0;
         die(errno, "open tap");
     }
-    // send RARP packet
-    // TODO answer ARP packets
-    // TODO use SIOCGIFHWADDR
-    char rarp_packet[] =
-        "\377\377\377\377"
-        "\377\377\126\222"
-        "\005\217\106\217"
-        "\200\065"
-        /* end ethernet*/
-        "\0\001\010\0"
-        "\006\004\0\003"
-        "\0\0\0\0"
-        "\0\0\0\0"
-        "\0\0\126\222"
-        "\005\217\106\217"
-        "\012\135\060\144";
-    write(tapfd, rarp_packet, sizeof(rarp_packet));
+    ip_addr_num = inet_addr(IP_ADDRESS);
+    init_hive(ip_addr_num, mac_addr);
+
     evutil_make_socket_nonblocking(tapfd);
     tap_listener_event = event_new(
             ev_base, tapfd, EV_READ|EV_PERSIST,

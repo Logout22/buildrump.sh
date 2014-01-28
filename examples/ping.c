@@ -131,6 +131,15 @@ int main(int argc, char *argv[]) {
     if ((res = request_hive_bind(unix_socket, PROTOCOL_TCP, portnum))) {
         die(-res, "explicit bind");
     }
+    if (rcv_message_type(unix_socket) != HIVE_BIND_REPLY) {
+        ERR("Incompatible bind server\n");
+        die(errno, "bind reply");
+    }
+    rcv_reply_hive_bind(unix_socket, &res);
+    if (res) {
+        die(-res, "explicit bind fail");
+    }
+    //END TODO
 
     res = rump_sys_bind(tcpsock, (struct sockaddr*) &sin, sizeof(sin));
     if (res != 0) {

@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <glib.h>
 #include <inttypes.h>
+#include <assert.h>
 
 #define ERR(...) { \
     fprintf(stderr, "hive: "); \
@@ -12,12 +13,14 @@
 }
 
 static GHashTable *hive_table[2];
-static in_addr_t ip_address_numeric;
+static in_addr_t ip_address;
+uint8_t mac_address[MAC_LEN];
 
-void init_hive(in_addr_t ip_address) {
+void init_hive(in_addr_t cur_ip_address, uint8_t *cur_mac_address) {
     hive_table[PROTOCOL_TCP] = g_hash_table_new(NULL, NULL);
     hive_table[PROTOCOL_UDP] = g_hash_table_new(NULL, NULL);
-    ip_address_numeric = ip_address;
+    CPYIP(&ip_address, &cur_ip_address);
+    CPYMAC(mac_address, cur_mac_address);
 }
 
 void shutdown_hive() {
@@ -28,16 +31,84 @@ void shutdown_hive() {
 // offset of source and destination address in Ethernet
 #define ETHEROFF 12
 
-#define LMASK(P, M, S) ((*((uint32_t*) (P)) & (M)) >> (S))
+// use memcpy/memcmp for everything above 2 bytes, if possible
+//#define LMASK(P, M, S) ntohl((*((uint32_t*) (P)) & (M)) >> (S))
 #define MASK(P, M, S) ntohs((*((uint16_t*) (P)) & (M)) >> (S))
 #define CMASK(P, M, S) ((*((uint8_t*) (P)) & (M)) >> (S))
 #define OFFSET(P, N) (((uint8_t*) (P)) + (N))
 
+extern bool dbg_dieafter;
+static void send_arp_reply(void *packet,
+        uint8_t *srcmac, uint8_t *srcip) {
+    // TODO add IPv6 support
+    // turn packet into opposite direction
+    CPYMAC(packet, srcmac);
+    CPYMAC(OFFSET(packet, MAC_LEN), mac_address);
+    uint8_t *curptr = OFFSET(packet, 20);
+    // set operation to reply
+    uint16_t op = htons(2);
+    memcpy(curptr, &op, 2);
+    // write source and destination
+    curptr += 2;
+    CPYMAC(curptr, mac_address);
+    curptr += MAC_LEN;
+    CPYIP(curptr, &ip_address);
+    curptr += IP_LEN;
+    CPYMAC(curptr, srcmac);
+    curptr += MAC_LEN;
+    CPYIP(curptr, srcip);
+    //dbg_dieafter = true;
+}
+
+static int handle_arp(void *packet, bool outgoing) {
+    // TODO add IPv6 support
+    uint8_t *curptr = OFFSET(packet, 14);
+    if (MASK(curptr, 0xFFFF, 0) == 1 /*Ethernet*/ &&
+            MASK(OFFSET(curptr, 2), 0xFFFF, 0) == 0x0800) {
+        curptr += 4;
+        assert(CMASK(curptr, 0xFF, 0) == MAC_LEN &&
+                CMASK(OFFSET(curptr, 1), 0xFF, 0) == IP_LEN);
+        curptr += 2;
+        // choose operation
+        int op = MASK(curptr, 0xFFFF, 0);
+        curptr += 2;
+        uint8_t arp_target_mac[MAC_LEN], arp_source_mac[MAC_LEN],
+                arp_target_ip[IP_LEN], arp_source_ip[IP_LEN];
+        CPYMAC(arp_source_mac, curptr);
+        curptr += MAC_LEN;
+        CPYIP(arp_source_ip, curptr);
+        curptr += IP_LEN;
+        CPYMAC(arp_target_mac, curptr);
+        curptr += MAC_LEN;
+        CPYIP(arp_target_ip, curptr);
+        if (op == 1) {
+            //handle ARP request
+            if (EQIP(arp_target_ip, &ip_address)) {
+                if (!outgoing) {
+                    send_arp_reply(packet,
+                            arp_source_mac, arp_source_ip);
+                    return FRAME_TO_TAP;
+                }
+            } else if (outgoing) {
+                return FRAME_TO_ALL;
+            }
+        } else if (op == 2) {
+            //handle ARP reply
+            if (outgoing) {
+                return FRAME_TO_TAP;
+            } else {
+                return FRAME_TO_ALL;
+            }
+        }
+    }
+    return DROP_FRAME;
+}
+
 struct ip_meta {
     int ipm_hlen;
     int ipm_protocol;
-    uint32_t ipm_sender;
-    uint32_t ipm_receiver;
+    in_addr_t ipm_sender;
+    in_addr_t ipm_receiver;
 };
 
 static struct ip_meta get_ip_metadata(void *packet) {
@@ -45,9 +116,18 @@ static struct ip_meta get_ip_metadata(void *packet) {
     uint8_t *curptr = OFFSET(packet, ETHEROFF);
     // getting protocol type at byte 12
     // return if payload is not IP
-    if (MASK(curptr, 0xFFFF, 0) != 0x0800) {
-        result.ipm_hlen = -1;
-        return result;
+    uint16_t frametype = MASK(curptr, 0xFFFF, 0);
+    switch (frametype) {
+        case 0x0800:
+            // regular IP, see below
+            break;
+        case 0x0806:
+            // ARP
+            result.ipm_hlen = -20;
+            return result;
+        default:
+            result.ipm_hlen = -1;
+            return result;
     }
     curptr += 2;
     //TODO missing IPv6 support:
@@ -68,9 +148,9 @@ static struct ip_meta get_ip_metadata(void *packet) {
 
     // skip to addresses
     curptr += 3;
-    result.ipm_sender = LMASK(curptr, 0xFFFFFFFF, 0);
+    CPYIP(&result.ipm_sender, curptr);
     curptr += 4;
-    result.ipm_receiver = LMASK(curptr, 0xFFFFFFFF, 0);
+    CPYIP(&result.ipm_receiver, curptr);
     return result;
 }
 
@@ -146,11 +226,11 @@ static int pass_for_port_local(int srcbus_id,
 
 int pass_for_frame(void *frame, int srcbus_id, bool outgoing) {
     struct ip_meta pktipm = get_ip_metadata(frame);
-    // TODO until non-IP frames can be properly handled, we
-    // need to pass them on; then we should revert to DROP_FRAME default
-    int pass = FRAME_TO_ALL;
-    //TODO handle non-IP frames (esp. ARP!)
-    if (pktipm.ipm_hlen > 0) {
+    int pass = DROP_FRAME;
+    //TODO handle more non-IP frames
+    if (pktipm.ipm_hlen == -20) {
+        pass = handle_arp(frame, outgoing);
+    } else if (pktipm.ipm_hlen > 0) {
         bool is_tcp = false;
         uint8_t *tcp_frame = NULL;
         switch (pktipm.ipm_protocol) {
@@ -162,8 +242,10 @@ int pass_for_frame(void *frame, int srcbus_id, bool outgoing) {
                 struct conn_desc pktcd = get_conn_metadata(
                         tcp_frame, is_tcp);
                 // TODO missing IPv6 support
-                if (CMASK(&pktipm.ipm_receiver, 0xFF, 0) == 127 ||
-                    ((in_addr_t)pktipm.ipm_receiver) == ip_address_numeric) {
+                if ((CMASK(&pktipm.ipm_receiver, 0xFF, 0) == 127 ||
+                    EQIP(&pktipm.ipm_receiver, &ip_address)) &&
+                    /* make sure packets are not re-sent: */
+                    !(outgoing && !EQIP(&pktipm.ipm_sender, &ip_address))) {
                     // TODO add broadcast/multicast/... addresses
                     pass = pass_for_port_local(
                             srcbus_id,
@@ -171,7 +253,7 @@ int pass_for_frame(void *frame, int srcbus_id, bool outgoing) {
                             pktcd.cd_dest_port,
                             outgoing, is_tcp);
                 } else {
-                    if (outgoing) {
+                    if (outgoing && EQIP(&pktipm.ipm_sender, &ip_address)) {
                         // this is not for our realm -- send it out
                         pass = FRAME_TO_TAP;
                     } else {

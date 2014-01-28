@@ -37,7 +37,7 @@ int main(int argc, char *argv[]) {
         die(errno, "socket");
     }
 
-    char const *srv_address = "10.93.48.100";
+    char const *srv_address = "10.93.49.100";
     short const portnum = 26420;
     ERR("Connecting to %s:%d\n", srv_address, portnum);
     struct sockaddr_in sin = {
