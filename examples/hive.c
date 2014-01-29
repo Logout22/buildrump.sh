@@ -37,7 +37,6 @@ void shutdown_hive() {
 #define CMASK(P, M, S) ((*((uint8_t*) (P)) & (M)) >> (S))
 #define OFFSET(P, N) (((uint8_t*) (P)) + (N))
 
-extern bool dbg_dieafter;
 static void send_arp_reply(void *packet,
         uint8_t *srcmac, uint8_t *srcip) {
     // TODO add IPv6 support
@@ -57,7 +56,6 @@ static void send_arp_reply(void *packet,
     CPYMAC(curptr, srcmac);
     curptr += MAC_LEN;
     CPYIP(curptr, srcip);
-    //dbg_dieafter = true;
 }
 
 static int handle_arp(void *packet, bool outgoing) {

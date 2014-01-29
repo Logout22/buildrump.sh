@@ -52,7 +52,6 @@
 #define IP_ADDRESS "10.93.49.100"
 in_addr_t ip_addr_num;
 uint8_t mac_addr[MAC_LEN];
-bool dbg_dieafter = false;
 
 //defining some BSD specific macros
 #include <stddef.h>
@@ -100,6 +99,7 @@ static struct event *unix_socket_listener_event = NULL,
              *inotify_listener_event = NULL;
 static GHashTable *busses = NULL;
 static struct event_base *ev_base;
+static bool hive_initialised = false;
 
 static void __attribute__((__noreturn__))
 die(int e, const char *msg)
@@ -178,7 +178,9 @@ void cleanup() {
     if (ev_base) {
         event_base_free(ev_base);
     }
-    shutdown_hive();
+    if (hive_initialised) {
+        shutdown_hive();
+    }
 }
 
 int tun_alloc(char *dev)
@@ -541,9 +543,6 @@ void handle_tapread(evutil_socket_t sockfd, short events, void *ignore) {
             writebus((struct tmpbus*) destbus,
                     readbuf, pktlen);
         }
-        if (dbg_dieafter) {
-            die(0, "DEBUG died as requested");
-        }
     }
 }
 
@@ -694,6 +693,7 @@ int main(int argc, char *argv[]) {
     }
     ip_addr_num = inet_addr(IP_ADDRESS);
     init_hive(ip_addr_num, mac_addr);
+    hive_initialised = true;
 
     evutil_make_socket_nonblocking(tapfd);
     tap_listener_event = event_new(
