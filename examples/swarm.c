@@ -240,6 +240,14 @@ uint32_t compare_exchange(uint32_t *addr, uint32_t old, uint32_t new) {
     return result;
 }
 
+uint32_t exchange(uint32_t *addr, uint32_t new) {
+    uint32_t result = new;
+    asm("xchgl %0, %1;"
+        : "+r"(result), "+m"(*addr)
+        : : "memory", "cc");
+    return result;
+}
+
 static void
 shmif_lockbus(struct shmif_mem *busmem)
 {
@@ -269,8 +277,7 @@ static void
 shmif_unlockbus(struct shmif_mem *busmem)
 {
     mfence();
-	uint32_t old = compare_exchange(&busmem->shm_lock,
-                LOCK_LOCKED, LOCK_UNLOCKED);
+	uint32_t old = exchange(&busmem->shm_lock, LOCK_UNLOCKED);
     assert(old == LOCK_LOCKED);
 }
 
