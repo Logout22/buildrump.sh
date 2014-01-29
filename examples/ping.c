@@ -117,7 +117,15 @@ int main(int argc, char *argv[]) {
         die(errno, "socket");
     }
 
-    short const portnum = 26420;
+
+    long req_port = 26420;
+    if (argc > 1) {
+        req_port = strtol(argv[1], NULL, 0);
+        if (req_port < 0 || req_port > 65535) {
+            die(26, "invalid port number");
+        }
+    }
+    uint16_t const portnum = (uint16_t) req_port;
     ERR("Binding to port %d\n", portnum);
     struct sockaddr_in sin = {
         .sin_family = AF_INET,

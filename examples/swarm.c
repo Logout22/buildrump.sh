@@ -263,8 +263,6 @@ shmif_lockbus(struct shmif_mem *busmem)
 		continue;
 	}
     mfence();
-
-    assert(busmem->shm_lock == LOCK_LOCKED);
 }
 
 static void
@@ -274,7 +272,6 @@ shmif_unlockbus(struct shmif_mem *busmem)
 	uint32_t old = compare_exchange(&busmem->shm_lock,
                 LOCK_LOCKED, LOCK_UNLOCKED);
     assert(old == LOCK_LOCKED);
-    assert(busmem->shm_lock == LOCK_UNLOCKED);
 }
 
 int initbus(struct tmpbus *newbus) {

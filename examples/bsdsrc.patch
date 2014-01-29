@@ -53,10 +53,10 @@ index bcf7182..e722051 100644
  	shmif_advancefirst(busmem, 0, len);
  
 diff --git a/sys/rump/net/lib/libshmif/shmifvar.h b/sys/rump/net/lib/libshmif/shmifvar.h
-index 7e9e509..11b3185 100644
+index 7e9e509..6b5ed1d 100644
 --- a/sys/rump/net/lib/libshmif/shmifvar.h
 +++ b/sys/rump/net/lib/libshmif/shmifvar.h
-@@ -61,7 +61,7 @@ struct shmif_pkthdr {
+@@ -61,11 +61,12 @@ struct shmif_pkthdr {
  #define BUSMEM_SIZE (1024*1024)
  #define BUSMEM_DATASIZE (BUSMEM_SIZE - sizeof(struct shmif_mem))
  
@@ -65,3 +65,8 @@ index 7e9e509..11b3185 100644
  #ifdef _KERNEL
  #include <rump/rumpuser.h>
  #define DPRINTF(x) rumpuser_dprintf x
+ #else
++#include <stdio.h>
+ #define DPRINTF(x) printf x
+ #endif
+ #else
