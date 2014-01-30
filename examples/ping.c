@@ -37,9 +37,11 @@ die(int e, const char *msg)
 }
 
 int tcpsock = -1;
+int unix_socket = -1;
 
 void __attribute__((__noreturn__))
 cleanup(int signum) {
+	if (unix_socket >= 0) close(unix_socket);
     if (tcpsock >= 0) rump_sys_close(tcpsock);
     die(signum, NULL);
 }
@@ -59,7 +61,7 @@ int main(int argc, char *argv[]) {
     sigaction(SIGTERM, &sigact, NULL);
 
     ERR("Fetching bus name\n");
-    int unix_socket = socket(AF_UNIX, SOCK_STREAM, 0);
+    unix_socket = socket(AF_UNIX, SOCK_STREAM, 0);
     if (!unix_socket) {
         ERR("socket() failed");
         die(errno, "socket");
@@ -190,9 +192,6 @@ int main(int argc, char *argv[]) {
     }
 
     ERR("Closing\n");
-    rump_sys_close(tcpsock);
-
-    close(unix_socket);
 
     die(0, NULL);
 }
