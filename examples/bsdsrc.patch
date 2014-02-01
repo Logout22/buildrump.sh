@@ -13,6 +13,28 @@ index a3af1f9..cd81999 100644
  .include <bsd.kinc.mk>
  
  .PATH: ${NETBSDSRCDIR}/sys/external/bsd/ipf/netinet
+diff --git a/sys/netinet/in_pcb.c b/sys/netinet/in_pcb.c
+index 2b9428a..1a01929 100644
+--- a/sys/netinet/in_pcb.c
++++ b/sys/netinet/in_pcb.c
+@@ -259,7 +259,7 @@ in_pcbsetport(struct sockaddr_in *sin, struct inpcb *inp, kauth_cred_t cred)
+        /*
+         * Use RFC6056 randomized port selection
+         */
+-	error = portalgo_randport(&lport, &inp->inp_head, cred);
++	error = portalgo_randport(&lport, &inp->inp_head, table, cred);
+ 	if (error)
+ 		return error;
+ 
+@@ -314,7 +314,7 @@ in_pcbbind_port(struct inpcb *inp, struct sockaddr_in *sin, kauth_cred_t cred)
+ 		 */
+ 		if (so->so_options & SO_REUSEADDR)
+ 			reuseport = SO_REUSEADDR|SO_REUSEPORT;
+-	} 
++	}
+ 
+ 	if (sin->sin_port == 0) {
+ 		error = in_pcbsetport(sin, inp, cred);
 diff --git a/sys/netinet/in_proto.c b/sys/netinet/in_proto.c
 index c8e2f7c..2909b21 100644
 --- a/sys/netinet/in_proto.c
@@ -54,11 +76,24 @@ index c8e2f7c..2909b21 100644
  sockaddr_in_addrlen(const struct sockaddr *sa, socklen_t *slenp)
  {
 diff --git a/sys/netinet/portalgo.c b/sys/netinet/portalgo.c
-index ee44d02..ea72a4e 100644
+index ee44d02..46f04db 100644
 --- a/sys/netinet/portalgo.c
 +++ b/sys/netinet/portalgo.c
-@@ -758,7 +758,8 @@ algo_randinc(int algo, uint16_t *port, struct inpcb_hdr *inp_hdr,
+@@ -66,6 +66,7 @@ __KERNEL_RCSID(0, "$NetBSD: portalgo.c,v 1.5 2013/06/01 11:01:48 pooka Exp $");
+ #include <netinet/tcp_vtw.h>
  
+ #include "portalgo.h"
++#include "rumpcomp_user.h"
+ 
+ #define NPROTO 2
+ #define PORTALGO_TCP 0
+@@ -756,9 +757,13 @@ algo_randinc(int algo, uint16_t *port, struct inpcb_hdr *inp_hdr,
+ 	return EINVAL;
+ }
+ 
++#define	INPCBHASH_PORT(table, lport) \
++	&(table)->inpt_porthashtbl[ntohs(lport) & (table)->inpt_porthash]
++
  /* The generic function called in order to pick a port. */
  int
 -portalgo_randport(uint16_t *port, struct inpcb_hdr *inp_hdr, kauth_cred_t cred)
@@ -67,7 +102,7 @@ index ee44d02..ea72a4e 100644
  {
  	int algo, error;
  	uint16_t lport;
-@@ -821,17 +822,34 @@ portalgo_randport(uint16_t *port, struct inpcb_hdr *inp_hdr, kauth_cred_t cred)
+@@ -821,17 +826,34 @@ portalgo_randport(uint16_t *port, struct inpcb_hdr *inp_hdr, kauth_cred_t cred)
  
  	DPRINTF("%s portalgo = %d\n", __func__, algo);
  
@@ -87,7 +122,7 @@ index ee44d02..ea72a4e 100644
 +	while (!error && hive_result) {
 +		error = (*algos[algo].func)(algo, &lport, inp_hdr, cred);
 +		if (error == 0) {
-+			error = request_port(lport, &hive_result);
++			error = hive_request_port(lport, &hive_result);
 +			if (error)
 +				return error;
 +			if (hive_result) {
@@ -113,15 +148,44 @@ index ee44d02..ea72a4e 100644
  	}
  	return error;
  }
+diff --git a/sys/netinet/portalgo.h b/sys/netinet/portalgo.h
+index 634ca72..2692035 100644
+--- a/sys/netinet/portalgo.h
++++ b/sys/netinet/portalgo.h
+@@ -32,9 +32,11 @@
+ 
+ #ifdef _KERNEL
+ #include <sys/sysctl.h>
++#include <netinet/in_pcb_hdr.h>
+ 
+ struct inpcb_hdr;
+-int portalgo_randport(uint16_t *, struct inpcb_hdr *, kauth_cred_t);
++int portalgo_randport(uint16_t *, struct inpcb_hdr *,
++          struct	  inpcbtable *table, kauth_cred_t);
+ int sysctl_portalgo_selected4(SYSCTLFN_ARGS);
+ int sysctl_portalgo_selected6(SYSCTLFN_ARGS);
+ int sysctl_portalgo_reserve4(SYSCTLFN_ARGS);
+diff --git a/sys/netinet/rumpcomp_user.h b/sys/netinet/rumpcomp_user.h
+index 2fa5e65..27a0a6a 100644
+--- a/sys/netinet/rumpcomp_user.h
++++ b/sys/netinet/rumpcomp_user.h
+@@ -1,6 +1,6 @@
+ #ifndef __NETINET_RUMPCOMP_USER__
+ #define __NETINET_RUMPCOMP_USER__
+ 
+-int hive_request_port(uint16_t port);
++int hive_request_port(uint16_t port, int32_t *p_bind_result);
+ 
+ #endif
 diff --git a/sys/netinet/tcp_usrreq.c b/sys/netinet/tcp_usrreq.c
-index cd23269..bb68a77 100644
+index cd23269..e041439 100644
 --- a/sys/netinet/tcp_usrreq.c
 +++ b/sys/netinet/tcp_usrreq.c
 @@ -157,6 +157,8 @@ __KERNEL_RCSID(0, "$NetBSD: tcp_usrreq.c,v 1.170 2013/12/02 09:39:54 kefren Exp
   * TCP protocol interface to socket abstraction.
   */
  
-+extern netbsd_kernel_protocol;
++extern int netbsd_kernel_protocol;
 +
  /*
   * Process a TCP user request for TCP tb.  If this is a send request
