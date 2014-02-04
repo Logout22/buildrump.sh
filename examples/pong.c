@@ -10,7 +10,7 @@
 #include <signal.h>
 
 #define ERR(...) { \
-    fprintf(stderr, "srv: "); \
+    fprintf(stderr, "clt: "); \
     fprintf(stderr, __VA_ARGS__); \
 }
 

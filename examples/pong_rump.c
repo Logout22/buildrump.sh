@@ -1,23 +1,20 @@
+#include <inttypes.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <string.h>
 #include <sys/types.h>
 #include <sys/cdefs.h>
 #include <sys/stat.h>
-
-#include <err.h>
-#include <errno.h>
-#include <netdb.h>
-#include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
-#include <string.h>
-#include <stropts.h>
+#include <errno.h>
+#include <err.h>
+#include <signal.h>
 
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#include <inttypes.h>
 #include <rump/rump.h>
 #include <rump/netconfig.h>
 #include <rump/rump_syscalls.h>
@@ -26,29 +23,28 @@
 #include "swarm.h"
 #include "swarm_ipc.h"
 
+#define ERR(...) { \
+    fprintf(stderr, "clt: "); \
+    fprintf(stderr, __VA_ARGS__); \
+}
+
+int unix_socket = -1;
+int tcpsock = -1;
+
 static void __attribute__((__noreturn__))
 die(int e, const char *msg)
 {
-
     if (msg)
-        warnx("%s: %d", msg, e);
+        warn("%s: %d", msg, e);
     rump_sys_reboot(0, NULL);
     exit(e);
 }
-
-int tcpsock = -1;
-int unix_socket = -1;
 
 void __attribute__((__noreturn__))
 cleanup(int signum) {
 	if (unix_socket >= 0) close(unix_socket);
     if (tcpsock >= 0) rump_sys_close(tcpsock);
     die(signum, NULL);
-}
-
-#define ERR(...) { \
-    fprintf(stderr, "srv: "); \
-    fprintf(stderr, __VA_ARGS__); \
 }
 
 int main(int argc, char *argv[]) {
@@ -119,7 +115,7 @@ int main(int argc, char *argv[]) {
         die(errno, "socket");
     }
 
-
+    char const *srv_address = "10.93.49.100";
     long req_port = 26420;
     if (argc > 1) {
         req_port = strtol(argv[1], NULL, 0);
@@ -128,70 +124,40 @@ int main(int argc, char *argv[]) {
         }
     }
     uint16_t const portnum = (uint16_t) req_port;
-    ERR("Binding to port %d\n", portnum);
+    ERR("Connecting to %s:%d\n", srv_address, portnum);
     struct sockaddr_in sin = {
         .sin_family = AF_INET,
         .sin_port = htons(portnum),
     };
-    // listen from all addresses
-    memset(&sin.sin_addr, 0, sizeof(sin.sin_addr));
-
-    //TODO remove ASA implicit bind works
-    int res;
-    if ((res = request_hive_bind(unix_socket, PROTOCOL_TCP, portnum))) {
-        die(-res, "explicit bind");
-    }
-    if (rcv_message_type(unix_socket) != HIVE_BIND_REPLY) {
-        ERR("Incompatible bind server\n");
-        die(errno, "bind reply");
-    }
-    rcv_reply_hive_bind(unix_socket, &res);
-    if (res) {
-        die(-res, "explicit bind fail");
-    }
-    //END TODO
-
-    res = rump_sys_bind(tcpsock, (struct sockaddr*) &sin, sizeof(sin));
+    inet_aton(srv_address, &sin.sin_addr);
+    int res = rump_sys_connect(
+            tcpsock, (struct sockaddr*) &sin, sizeof(sin));
     if (res != 0) {
-        die(errno, "bind");
+        die(errno, "connect");
     }
 
-    ERR("Listening (Queue length 120)\n");
-    res = rump_sys_listen(tcpsock, 120);
-    if (res != 0) {
-        die(errno, "listen");
-    }
-
-    for(;;) {
-        ERR("Accepting...\n");
-        int rcvsock = rump_sys_accept(tcpsock, NULL, 0);
-        if (rcvsock <= 0) {
-            die(errno, "accept");
+    int i;
+    int const bufsize = 50;
+    char rbuf[bufsize + 1];
+    rbuf[bufsize] = 0;
+    for(i = 0; i < 4; i++) {
+        char const wbuf[] = "Ping.\0";
+        res = rump_sys_write(tcpsock, wbuf, sizeof(wbuf));
+        if (res <= 0) {
+            die(errno, "write");
         }
-
-        int const bufsize = 50;
-        char rbuf[bufsize + 1];
-        rbuf[bufsize] = 0;
-        //ERR("Reading at most %d bytes\n", bufsize);
-        //int i;
-        while((res = rump_sys_read(rcvsock, rbuf, bufsize)) > 0) {
-            /*
-            if (res <= 0) {
-                die(errno, "read");
-            }
-            */
-            ERR("rcvd %s\n", rbuf);
-            sleep(1);
-            char const wbuf[] = "Pong.\0";
-            res = rump_sys_write(rcvsock, wbuf, sizeof(wbuf));
-            if (res <= 0) {
-                die(errno, "write");
-            }
+        res = rump_sys_read(tcpsock, rbuf, bufsize);
+        if (res <= 0) {
+            die(errno, "read");
         }
-        rump_sys_close(rcvsock);
+        ERR("rcvd %s\n", rbuf);
+        sleep(1);
     }
 
-    ERR("Closing\n");
+    rump_sys_close(tcpsock);
+    close(unix_socket);
 
-    die(0, NULL);
+
+    exit(0);
 }
+

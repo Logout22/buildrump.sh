@@ -1,18 +1,14 @@
-diff --git a/sys/netinet/Makefile b/sys/netinet/Makefile
-index a3af1f9..cd81999 100644
---- a/sys/netinet/Makefile
-+++ b/sys/netinet/Makefile
-@@ -23,6 +23,10 @@ INCS+=	ip_auth.h ip_fil.h ip_frag.h ip_htable.h ip_nat.h \
- 	ipf_rb.h ipl.h
- .endif
+diff --git a/lib/librumpnet/Makefile b/lib/librumpnet/Makefile
+index f7dc5ff..55a1b71 100644
+--- a/lib/librumpnet/Makefile
++++ b/lib/librumpnet/Makefile
+@@ -7,4 +7,6 @@ LIBDPLIBS+=     rump	${.CURDIR}/../librump
  
-+RUMPCOMP_USER=	# filewatch
+ WARNS=		3	# XXX: kernel isn't ready for -Wsign-compare
+ 
++RUMPCOMP_USER=
 +
-+.include <bsd.lib.mk>
-+.include <bsd.klinks.mk>
- .include <bsd.kinc.mk>
- 
- .PATH: ${NETBSDSRCDIR}/sys/external/bsd/ipf/netinet
+ .include "${RUMPTOP}/librump/rumpnet/Makefile.rumpnet"
 diff --git a/sys/netinet/in_pcb.c b/sys/netinet/in_pcb.c
 index 2b9428a..1a01929 100644
 --- a/sys/netinet/in_pcb.c
@@ -76,7 +72,7 @@ index c8e2f7c..2909b21 100644
  sockaddr_in_addrlen(const struct sockaddr *sa, socklen_t *slenp)
  {
 diff --git a/sys/netinet/portalgo.c b/sys/netinet/portalgo.c
-index ee44d02..46f04db 100644
+index ee44d02..259b64c 100644
 --- a/sys/netinet/portalgo.c
 +++ b/sys/netinet/portalgo.c
 @@ -66,6 +66,7 @@ __KERNEL_RCSID(0, "$NetBSD: portalgo.c,v 1.5 2013/06/01 11:01:48 pooka Exp $");
@@ -87,7 +83,15 @@ index ee44d02..46f04db 100644
  
  #define NPROTO 2
  #define PORTALGO_TCP 0
-@@ -756,9 +757,13 @@ algo_randinc(int algo, uint16_t *port, struct inpcb_hdr *inp_hdr,
+@@ -145,6 +146,7 @@ static const portalgo_algorithm_t algos[] = {
+ #define NALGOS __arraycount(algos)
+ 
+ static uint16_t portalgo_next_ephemeral[NPROTO][NAF][NRANGES][NALGOS];
++extern int netbsd_kernel_protocol;
+ 
+ /*
+  * Access the pcb and copy the values of the last port and the ends of
+@@ -756,9 +758,13 @@ algo_randinc(int algo, uint16_t *port, struct inpcb_hdr *inp_hdr,
  	return EINVAL;
  }
  
@@ -102,7 +106,7 @@ index ee44d02..46f04db 100644
  {
  	int algo, error;
  	uint16_t lport;
-@@ -821,17 +826,34 @@ portalgo_randport(uint16_t *port, struct inpcb_hdr *inp_hdr, kauth_cred_t cred)
+@@ -821,17 +827,35 @@ portalgo_randport(uint16_t *port, struct inpcb_hdr *inp_hdr, kauth_cred_t cred)
  
  	DPRINTF("%s portalgo = %d\n", __func__, algo);
  
@@ -122,7 +126,8 @@ index ee44d02..46f04db 100644
 +	while (!error && hive_result) {
 +		error = (*algos[algo].func)(algo, &lport, inp_hdr, cred);
 +		if (error == 0) {
-+			error = hive_request_port(lport, &hive_result);
++			error = rumpcomp_librumpnet_hive_request_port(
++                        lport, &hive_result, netbsd_kernel_protocol);
 +			if (error)
 +				return error;
 +			if (hive_result) {
@@ -166,17 +171,25 @@ index 634ca72..2692035 100644
  int sysctl_portalgo_selected6(SYSCTLFN_ARGS);
  int sysctl_portalgo_reserve4(SYSCTLFN_ARGS);
 diff --git a/sys/netinet/rumpcomp_user.h b/sys/netinet/rumpcomp_user.h
-index 2fa5e65..27a0a6a 100644
+deleted file mode 100644
+index 2fa5e65..0000000
 --- a/sys/netinet/rumpcomp_user.h
-+++ b/sys/netinet/rumpcomp_user.h
-@@ -1,6 +1,6 @@
- #ifndef __NETINET_RUMPCOMP_USER__
- #define __NETINET_RUMPCOMP_USER__
- 
++++ /dev/null
+@@ -1,6 +0,0 @@
+-#ifndef __NETINET_RUMPCOMP_USER__
+-#define __NETINET_RUMPCOMP_USER__
+-
 -int hive_request_port(uint16_t port);
-+int hive_request_port(uint16_t port, int32_t *p_bind_result);
- 
- #endif
+-
+-#endif
+diff --git a/sys/netinet/rumpcomp_user.h b/sys/netinet/rumpcomp_user.h
+new file mode 120000
+index 0000000..aa58526
+--- /dev/null
++++ b/sys/netinet/rumpcomp_user.h
+@@ -0,0 +1 @@
++../../lib/librumpnet/rumpcomp_user.h
+\ No newline at end of file
 diff --git a/sys/netinet/tcp_usrreq.c b/sys/netinet/tcp_usrreq.c
 index cd23269..e041439 100644
 --- a/sys/netinet/tcp_usrreq.c
@@ -454,75 +467,3 @@ index a36fbb9..3c704bd 100644
  	in6p->in6p_flags |= IN6P_ANONPORT;
  	*lastport = lport;
  	in6p->in6p_lport = htons(lport);
-diff --git a/sys/rump/net/lib/libshmif/if_shmem.c b/sys/rump/net/lib/libshmif/if_shmem.c
-index 490ca82..90b4e50 100644
---- a/sys/rump/net/lib/libshmif/if_shmem.c
-+++ b/sys/rump/net/lib/libshmif/if_shmem.c
-@@ -161,7 +161,8 @@ allocif(int unit, struct shmif_sc **scp)
- 	uint32_t randnum;
- 	int error;
- 
--	randnum = cprng_fast32();
-+//	randnum = cprng_fast32();
-+    randnum = 0xc282c830;
- 	memcpy(&enaddr[2], &randnum, sizeof(randnum));
- 
- 	sc = kmem_zalloc(sizeof(*sc), KM_SLEEP);
-@@ -225,7 +226,7 @@ initbackend(struct shmif_sc *sc, int memfd)
- 	    && sc->sc_busmem->shm_magic != SHMIF_MAGIC) {
- 		printf("bus is not magical");
- 		rumpuser_unmap(sc->sc_busmem, BUSMEM_SIZE);
--		return ENOEXEC; 
-+		return ENOEXEC;
- 	}
- 
- 	/*
-@@ -674,7 +675,7 @@ shmif_rcv(void *arg)
- 		KASSERT(busmem->shm_gen >= sc->sc_devgen);
- 
- 		/* need more data? */
--		if (sc->sc_devgen == busmem->shm_gen && 
-+		if (sc->sc_devgen == busmem->shm_gen &&
- 		    shmif_nextpktoff(busmem, busmem->shm_last)
- 		     == sc->sc_nextpacket) {
- 			shmif_unlockbus(busmem);
-diff --git a/sys/rump/net/lib/libshmif/shmif_busops.c b/sys/rump/net/lib/libshmif/shmif_busops.c
-index bcf7182..e722051 100644
---- a/sys/rump/net/lib/libshmif/shmif_busops.c
-+++ b/sys/rump/net/lib/libshmif/shmif_busops.c
-@@ -111,7 +111,7 @@ shmif_buswrite(struct shmif_mem *busmem, uint32_t off, void *data, size_t len,
- 
- 	memcpy(busmem->shm_data + off, data, chunk);
- 
--	DPRINTF(("buswrite: wrote %d bytes to %d", chunk, off));
-+	DPRINTF(("buswrite: wrote %zd bytes to %d", chunk, off));
- 
- 	if (filledbus) {
- 		*wrap = true;
-@@ -122,7 +122,7 @@ shmif_buswrite(struct shmif_mem *busmem, uint32_t off, void *data, size_t len,
- 		return (off + chunk) % BUSMEM_DATASIZE;
- 	}
- 
--	DPRINTF((", wrapped bytes %d to 0\n", len));
-+	DPRINTF((", wrapped bytes %zd to 0\n", len));
- 
- 	shmif_advancefirst(busmem, 0, len);
- 
-diff --git a/sys/rump/net/lib/libshmif/shmifvar.h b/sys/rump/net/lib/libshmif/shmifvar.h
-index 7e9e509..6b5ed1d 100644
---- a/sys/rump/net/lib/libshmif/shmifvar.h
-+++ b/sys/rump/net/lib/libshmif/shmifvar.h
-@@ -61,11 +61,12 @@ struct shmif_pkthdr {
- #define BUSMEM_SIZE (1024*1024)
- #define BUSMEM_DATASIZE (BUSMEM_SIZE - sizeof(struct shmif_mem))
- 
--#if 0
-+#if 1
- #ifdef _KERNEL
- #include <rump/rumpuser.h>
- #define DPRINTF(x) rumpuser_dprintf x
- #else
-+#include <stdio.h>
- #define DPRINTF(x) printf x
- #endif
- #else
