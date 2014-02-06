@@ -90,7 +90,6 @@ struct tmpbus {
     int tmpbus_wd;
     struct shmif_mem *tmpbus_header;
     struct shmif_handle *tmpbus_position;
-    struct event *tmpbus_event;
 };
 
 static int unix_socket = 0, tapfd = 0, inotify_hdl = 0;
@@ -117,15 +116,12 @@ cleanup_sig(int signum) {
 void deallocate_bus(gpointer dataptr) {
     struct tmpbus *busptr = dataptr;
 
-    if (busptr->tmpbus_event) {
-        event_free(busptr->tmpbus_event);
-    }
     if (busptr->tmpbus_header) {
         munmap(busptr->tmpbus_header, BUSMEM_SIZE);
     }
     if (busptr->tmpbus_hdl) {
         close(busptr->tmpbus_hdl);
-        // should be left for debugging purposes:
+        // should be left out for debugging purposes:
         //unlink(busptr->tmpbus_name);
     }
     free(busptr->tmpbus_position);
@@ -165,8 +161,15 @@ void cleanup() {
     if (unix_socket_listener_event) {
         event_free(unix_socket_listener_event);
     }
+    if (tap_listener_event) {
+        event_free(tap_listener_event);
+    }
+    if (inotify_listener_event) {
+        event_free(inotify_listener_event);
+    }
     if (unix_socket) {
-        close(unix_socket);
+        //should be handled by swarm_ipc's bufevent:
+        //close(unix_socket);
         unlink(SOCK_FN);
     }
     if (inotify_hdl) {
@@ -235,7 +238,7 @@ void mfence() {
 // man, this sucks in Linux
 uint32_t compare_exchange(uint32_t *addr, uint32_t old, uint32_t new) {
     uint32_t result;
-    asm("cmpxchgl %3, %1;"
+    asm("lock cmpxchgl %3, %1;"
         : "=a"(result), "+m"(*addr)
         : "a"(old), "r"(new)
         : "memory");

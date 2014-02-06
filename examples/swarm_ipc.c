@@ -40,12 +40,11 @@ struct bind_rep {
     int32_t br_result;
 };
 
-static struct event_base *ev_base = NULL;
-static struct bufferevent *bufevent = NULL;
+static struct sipc_state *default_state = NULL;
 static bool exit_handler_registered = false;
 
 static void exit_handler() {
-    bufferevent_free(bufevent);
+    deallocate_sipc_state(default_state);
 }
 
 void errorcb(struct bufferevent *bev, short error, void *ctx) {
@@ -72,6 +71,14 @@ void errorcb(struct bufferevent *bev, short error, void *ctx) {
     }
 }
 
+struct sipc_state *allocate_sipc_state(int sock);
+
+void deallocate_sipc_state(struct sipc_state *oldstate) {
+    bufferevent_free(oldstate->bufevent);
+    event_base_free(oldstate->ev_base);
+    free(oldstate);
+}
+
 int sipc_set_socket(int socket) {
     if (ev_base == NULL) {
         ev_base = event_base_new();
@@ -91,13 +98,28 @@ int sipc_set_socket(int socket) {
     bufferevent_enable(bev, EV_READ|EV_WRITE);
 }
 
+void sipc_set_default_state(int sock) {
+    if (default_state) {
+        deallocate_sipc_state(default_state);
+    }
+    default_state = allocate_sipc_state();
+}
+
 static ssize_t bev_read(void *data, size_t bytecount) {
+    if (bufevent == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
     assert(bytecount < SIZE_MAX / 2);
     return ((ssize_t) bufferevent_read(
                 bufevent, data, bytecount));
 }
 
 static ssize_t bev_write(const void* data, size_t bytecount) {
+    if (bufevent == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
     assert(bytecount < SIZE_MAX / 2);
     int res = bufferevent_write(bufevent, data, bytecount);
     if (res) {
@@ -134,9 +156,9 @@ static bool OP##_struct(CONST void *structp, size_t structsize) { \
 DEFINE_STRUCT_OPERATION(read,);
 DEFINE_STRUCT_OPERATION(write, const);
 
-int32_t rcv_message_type(int sock) {
+int32_t rcv_message_type() {
     struct unxsock_msg rcvd_hdr;
-    if (!read_struct(sock, &rcvd_hdr, sizeof(rcvd_hdr)) ||
+    if (!read_struct(&rcvd_hdr, sizeof(rcvd_hdr)) ||
             rcvd_hdr.um_ver > USOCK_VERSION) {
         return -errno;
     }
@@ -146,20 +168,20 @@ int32_t rcv_message_type(int sock) {
     return rcvd_hdr.um_msgid;
 }
 
-static int send_message_type(int sock, int32_t msgid) {
+static int send_message_type(int32_t msgid) {
     struct unxsock_msg send_hdr = {
         .um_ver = USOCK_VERSION,
         .um_msgid = msgid,
     };
-    if (!write_struct(sock, &send_hdr, sizeof(send_hdr))) {
+    if (!write_struct(&send_hdr, sizeof(send_hdr))) {
         return -errno;
     }
     return 0;
 }
 
-int request_swarm_getshm(int sock) {
+int request_swarm_getshm() {
     int res;
-    if ((res = send_message_type(sock, SWARM_GETSHM))) {
+    if ((res = send_message_type(SWARM_GETSHM))) {
         return res;
     }
 
@@ -169,9 +191,9 @@ int request_swarm_getshm(int sock) {
     return 0;
 }
 
-int reply_swarm_getshm(int sock, in_addr_t ip_addr, char *filename) {
+int reply_swarm_getshm(in_addr_t ip_addr, char *filename) {
     int res;
-    if ((res = send_message_type(sock, SWARM_GETSHM_REPLY))) {
+    if ((res = send_message_type(SWARM_GETSHM_REPLY))) {
         return res;
     }
 
@@ -186,19 +208,19 @@ int reply_swarm_getshm(int sock, in_addr_t ip_addr, char *filename) {
         .gr_filename_len = (uint32_t) retr_len
     };
 
-    if (!write_struct(sock, &to_send, sizeof(to_send))) {
+    if (!write_struct(&to_send, sizeof(to_send))) {
         return -errno;
     }
 
-    if (!write_struct(sock, filename, to_send.gr_filename_len)) {
+    if (!write_struct(filename, to_send.gr_filename_len)) {
         return -errno;
     }
     return 0;
 }
 
-int request_hive_bind(int sock, uint32_t protocol, uint32_t port) {
+int request_hive_bind(uint32_t protocol, uint32_t port) {
     int res;
-    if ((res = send_message_type(sock, HIVE_BIND))) {
+    if ((res = send_message_type(HIVE_BIND))) {
         return res;
     }
 
@@ -206,35 +228,35 @@ int request_hive_bind(int sock, uint32_t protocol, uint32_t port) {
         .bm_protocol = protocol,
         .bm_resource = port,
     };
-    if (!write_struct(sock, &to_send, sizeof(to_send))) {
+    if (!write_struct(&to_send, sizeof(to_send))) {
         return -errno;
     }
     return 0;
 }
 
-int reply_hive_bind(int sock, int32_t result) {
+int reply_hive_bind(int32_t result) {
     int res;
-    if ((res = send_message_type(sock, HIVE_BIND_REPLY))) {
+    if ((res = send_message_type(HIVE_BIND_REPLY))) {
         return res;
     }
 
     struct bind_rep to_send = {
         .br_result = result,
     };
-    if (!write_struct(sock, &to_send, sizeof(to_send))) {
+    if (!write_struct(&to_send, sizeof(to_send))) {
         return -errno;
     }
     return 0;
 }
 
-int rcv_request_swarm_getshm(int sock) {
+int rcv_request_swarm_getshm() {
     /* fill in something as soon as required */
     return 0;
 }
 
-int rcv_reply_swarm_getshm(int sock, in_addr_t *ip_addr, char **filename) {
+int rcv_reply_swarm_getshm(in_addr_t *ip_addr, char **filename) {
     struct getshm_rep to_rcv = {};
-    if (!read_struct(sock, &to_rcv, sizeof(to_rcv))) {
+    if (!read_struct(&to_rcv, sizeof(to_rcv))) {
         return -errno;
     }
 
@@ -247,7 +269,7 @@ int rcv_reply_swarm_getshm(int sock, in_addr_t *ip_addr, char **filename) {
     }
     memset(rcvd_filename, 0, rcvd_filename_size);
 
-    if (!read_struct(sock, rcvd_filename, to_rcv.gr_filename_len)) {
+    if (!read_struct(rcvd_filename, to_rcv.gr_filename_len)) {
         return -errno;
     }
 
@@ -256,9 +278,9 @@ int rcv_reply_swarm_getshm(int sock, in_addr_t *ip_addr, char **filename) {
     return 0;
 }
 
-int rcv_request_hive_bind(int sock, uint32_t *protocol, uint32_t *port) {
+int rcv_request_hive_bind(uint32_t *protocol, uint32_t *port) {
     struct bind_msg to_rcv = {};
-    if (!read_struct(sock, &to_rcv, sizeof(to_rcv))) {
+    if (!read_struct(&to_rcv, sizeof(to_rcv))) {
         return -errno;
     }
 
@@ -267,9 +289,9 @@ int rcv_request_hive_bind(int sock, uint32_t *protocol, uint32_t *port) {
     return 0;
 }
 
-int rcv_reply_hive_bind(int sock, int32_t *result) {
+int rcv_reply_hive_bind(int32_t *result) {
     struct bind_rep to_rcv = {};
-    if (!read_struct(sock, &to_rcv, sizeof(to_rcv))) {
+    if (!read_struct(&to_rcv, sizeof(to_rcv))) {
         return -errno;
     }
 

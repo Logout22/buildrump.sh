@@ -77,19 +77,22 @@ int main(int argc, char *argv[]) {
         die(errno, "connect");
     }
 
-    if (request_swarm_getshm(unix_socket)) {
+    // initialise swarm_ipc
+    sipc_set_socket(unix_socket);
+
+    if (request_swarm_getshm()) {
         ERR("Could request SHM\n");
         die(errno, "payload");
     }
 
-    if (rcv_message_type(unix_socket) != SWARM_GETSHM_REPLY) {
+    if (rcv_message_type() != SWARM_GETSHM_REPLY) {
         ERR("Incompatible server\n");
         die(errno, "reply");
     }
 
     char *filename;
     in_addr_t ip_address;
-    if (rcv_reply_swarm_getshm(unix_socket, &ip_address, &filename) < 0) {
+    if (rcv_reply_swarm_getshm(&ip_address, &filename) < 0) {
         ERR("Could not read reply\n");
         die(errno, "read");
     }
@@ -138,14 +141,14 @@ int main(int argc, char *argv[]) {
 
     //TODO remove ASA implicit bind works
     int res;
-    if ((res = request_hive_bind(unix_socket, PROTOCOL_TCP, portnum))) {
+    if ((res = request_hive_bind(PROTOCOL_TCP, portnum))) {
         die(-res, "explicit bind");
     }
-    if (rcv_message_type(unix_socket) != HIVE_BIND_REPLY) {
+    if (rcv_message_type() != HIVE_BIND_REPLY) {
         ERR("Incompatible bind server\n");
         die(errno, "bind reply");
     }
-    rcv_reply_hive_bind(unix_socket, &res);
+    rcv_reply_hive_bind(&res);
     if (res) {
         die(-res, "explicit bind fail");
     }
