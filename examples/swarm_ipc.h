@@ -17,6 +17,7 @@
 #define HIVE_SUCCESS 0
 #define HIVE_FAILURE -1
 
+int sipc_set_socket(int socket);
 /**
  * Request a shared memory area for packet transfer.
  * \param sock the UNIX socket to send the request to

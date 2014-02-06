@@ -11,6 +11,7 @@ cc -g -Wall -O0 swarm.c $SHMIFD/shmif_busops.c hive.c swarm_ipc.c \
        `pkg-config --libs glib-2.0` `pkg-config --libs libevent` -lrt \
        || exit 1
 cc -g -Wall -O0 pong.c -o pong || exit 1
+cc -g -Wall -O0 ping_norump.c -o ping_norump || exit 1
 cc -g -Wall -O0 pong_rump.c swarm_ipc.c -o pong_rump -I$RD/include -L$RD/lib \
        -Wl,-R$RD/lib -Wl,--no-as-needed \
        -lrumpnet_shmif -lrumpnet_config \

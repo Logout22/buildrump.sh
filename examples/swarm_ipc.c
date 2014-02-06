@@ -6,6 +6,12 @@
 #include <assert.h>
 #include <errno.h>
 
+#include <event2/event.h>
+#include <event2/buffer.h>
+#include <event2/bufferevent.h>
+
+#include <stdio.h>
+
 struct unxsock_msg {
     uint32_t um_ver;
     int32_t um_msgid;
@@ -34,14 +40,81 @@ struct bind_rep {
     int32_t br_result;
 };
 
+static struct event_base *ev_base = NULL;
+static struct bufferevent *bufevent = NULL;
+static bool exit_handler_registered = false;
+
+static void exit_handler() {
+    bufferevent_free(bufevent);
+}
+
+void errorcb(struct bufferevent *bev, short error, void *ctx) {
+    assert(bufevent == bev);
+    bool finished = false;
+    // XXX generalise printf to some in-program error string handler
+    if (error & BEV_EVENT_EOF) {
+        size_t len = evbuffer_get_length(input);
+        if (len > 0) {
+            printf("Discarding %zu bytes on EOF.\n", len);
+        }
+        finished = 1;
+    } else if (error & BEV_EVENT_ERROR) {
+        printf("Got an error from %s: %s\n",
+            inf->name, evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
+        finished = 1;
+    } else if (error & BEV_EVENT_TIMEOUT) {
+        // XXX a production version of swarm should handle
+        // client timeouts
+    }
+    if (finished) {
+        bufferevent_free(bufevent);
+        bufevent = NULL;
+    }
+}
+
+int sipc_set_socket(int socket) {
+    if (ev_base == NULL) {
+        ev_base = event_base_new();
+    }
+    if (bufevent) {
+        bufferevent_free(bufevent);
+    }
+    bufevent = bufferevent_socket_new(
+            ev_base, socket, BEV_OPT_CLOSE_ON_FREE);
+    if (!exit_handler_registered) {
+        atexit(exit_handler);
+        exit_handler_registered = true;
+    }
+    bufferevent_setcb(bufevent, NULL, NULL, errorcb, NULL);
+    bufferevent_setwatermark(
+            bufevent, EV_READ, sizeof(unixsock_msg), SIZE_MAX);
+    bufferevent_enable(bev, EV_READ|EV_WRITE);
+}
+
+static ssize_t bev_read(void *data, size_t bytecount) {
+    assert(bytecount < SIZE_MAX / 2);
+    return ((ssize_t) bufferevent_read(
+                bufevent, data, bytecount));
+}
+
+static ssize_t bev_write(const void* data, size_t bytecount) {
+    assert(bytecount < SIZE_MAX / 2);
+    int res = bufferevent_write(bufevent, data, bytecount);
+    if (res) {
+        return res;
+    } else {
+        return bytecount;
+    }
+}
+
 #define DEFINE_STRUCT_OPERATION(OP, CONST) \
-static bool OP##_struct(int fd, CONST void *structp, size_t structsize) { \
+static bool OP##_struct(CONST void *structp, size_t structsize) { \
     size_t bytes_to_process = structsize; \
 \
     /* proceed bytewise (int8_t*) */ \
     CONST int8_t *hdrp = structp; \
     while (bytes_to_process > 0) { \
-        ssize_t this_run = OP(fd, hdrp, bytes_to_process); \
+        ssize_t this_run = bev_##OP(bufevent, hdrp, bytes_to_process); \
         if (this_run <= 0) { \
             if (errno == EAGAIN || errno == EINTR) { \
                 continue; \
