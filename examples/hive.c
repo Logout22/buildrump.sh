@@ -1,6 +1,6 @@
 #include "hive.h"
 #include "swarm.h"
-#include "swarm_ipc.h"
+#include "swarm_server_ipc.h"
 
 #include <stdio.h>
 #include <glib.h>
@@ -190,7 +190,7 @@ static int lookup_dest_bus(uint16_t dest_port, int table_idx) {
     return pass;
 }
 
-void register_connection(int socket, int bus_id,
+void register_connection(struct bufferevent *bev, int bus_id,
         uint32_t protocol, uint32_t resource) {
     int32_t result = -1;
     if (protocol < 2 && resource <= UINT16_MAX &&
@@ -202,7 +202,7 @@ void register_connection(int socket, int bus_id,
                 GINT_TO_POINTER(bus_id));
         result = 0;
     }
-    reply_hive_bind(socket, result);
+    reply_hive_bind(bev, result);
 }
 
 static int pass_for_port_local(int srcbus_id,

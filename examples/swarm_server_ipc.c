@@ -6,166 +6,126 @@
 #include <assert.h>
 #include <errno.h>
 
-#include <event2/event.h>
-#include <event2/buffer.h>
-#include <event2/bufferevent.h>
-
 #include <stdio.h>
 
-static struct sipc_state *default_state = NULL;
-static bool exit_handler_registered = false;
-
-static void exit_handler() {
-    deallocate_sipc_state(default_state);
-}
+void __attribute__((__noreturn__))
+die(int, const char*);
 
 void errorcb(struct bufferevent *bev, short error, void *ctx) {
-    assert(bufevent == bev);
     bool finished = false;
+
     // XXX generalise printf to some in-program error string handler
     if (error & BEV_EVENT_EOF) {
-        size_t len = evbuffer_get_length(input);
+        size_t len = evbuffer_get_length(bufferevent_get_input(bev));
         if (len > 0) {
             printf("Discarding %zu bytes on EOF.\n", len);
         }
-        finished = 1;
     } else if (error & BEV_EVENT_ERROR) {
-        printf("Got an error from %s: %s\n",
-            inf->name, evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
-        finished = 1;
+        printf("Got an error: %s\n",
+            evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
+        finished = true;
     } else if (error & BEV_EVENT_TIMEOUT) {
         // XXX a production version of swarm should handle
         // client timeouts
     }
     if (finished) {
-        bufferevent_free(bufevent);
-        bufevent = NULL;
+        die(0, NULL);
     }
 }
 
-struct sipc_state *allocate_sipc_state(int sock);
-
-void deallocate_sipc_state(struct sipc_state *oldstate) {
-    bufferevent_free(oldstate->bufevent);
-    event_base_free(oldstate->ev_base);
-    free(oldstate);
+size_t sipc_struct_size(int32_t msgid) {
+    switch (msgid) {
+        case SWARM_GETSHM:
+            return sizeof(struct getshm_msg);
+        case SWARM_GETSHM_REPLY:
+            return sizeof(struct getshm_rep);
+        case HIVE_BIND:
+            return sizeof(struct bind_msg);
+        case HIVE_BIND_REPLY:
+            return sizeof(struct bind_rep);
+        default:
+            return 0;
+    }
 }
 
-int sipc_set_socket(int socket) {
-    if (ev_base == NULL) {
-        ev_base = event_base_new();
-    }
-    if (bufevent) {
-        bufferevent_free(bufevent);
-    }
-    bufevent = bufferevent_socket_new(
-            ev_base, socket, BEV_OPT_CLOSE_ON_FREE);
-    if (!exit_handler_registered) {
-        atexit(exit_handler);
-        exit_handler_registered = true;
-    }
-    bufferevent_setcb(bufevent, NULL, NULL, errorcb, NULL);
+void deallocate_bufferevent(struct bufferevent *oldstate) {
+    bufferevent_free(oldstate);
+}
+
+static void reset_watermark(struct bufferevent *state) {
+    // first receive a message header
     bufferevent_setwatermark(
-            bufevent, EV_READ, sizeof(unixsock_msg), SIZE_MAX);
-    bufferevent_enable(bev, EV_READ|EV_WRITE);
+            state, EV_READ, sizeof(struct unxsock_msg ), SIZE_MAX);
 }
 
-void sipc_set_default_state(int sock) {
-    if (default_state) {
-        deallocate_sipc_state(default_state);
+static void set_watermark(struct bufferevent *state, int32_t msgid) {
+    // now expect to read a whole struct of the requested type
+    bufferevent_setwatermark(state, EV_READ,
+            sipc_struct_size(msgid), SIZE_MAX);
+}
+
+struct bufferevent *initialise_bufferevent(
+        struct event_base *ev_ba, int sock,
+        bufferevent_data_cb readcb, void *context_object) {
+    struct bufferevent *result = bufferevent_socket_new(
+            ev_ba, sock, BEV_OPT_CLOSE_ON_FREE);
+    bufferevent_setcb(result, readcb, NULL, errorcb, context_object);
+    reset_watermark(result);
+    bufferevent_enable(result, EV_READ|EV_WRITE);
+    return result;
+}
+
+static bool read_struct(
+        struct bufferevent *state, void *structp, size_t structsize) {
+    if (state == NULL) {
+        errno = EINVAL;
+        return false;
     }
-    default_state = allocate_sipc_state();
+    assert(structsize < SIZE_MAX / 2);
+
+    size_t this_run = bufferevent_read(state, structp, structsize);
+    return (this_run == structsize);
 }
 
-static ssize_t bev_read(void *data, size_t bytecount) {
-    if (bufevent == NULL) {
+static bool write_struct(
+        struct bufferevent *state, const void* data, size_t bytecount) {
+    if (state == NULL) {
         errno = EINVAL;
         return -1;
     }
     assert(bytecount < SIZE_MAX / 2);
-    return ((ssize_t) bufferevent_read(
-                bufevent, data, bytecount));
+    int res = bufferevent_write(state, data, bytecount);
+    return (res == 0);
 }
 
-static ssize_t bev_write(const void* data, size_t bytecount) {
-    if (bufevent == NULL) {
-        errno = EINVAL;
-        return -1;
-    }
-    assert(bytecount < SIZE_MAX / 2);
-    int res = bufferevent_write(bufevent, data, bytecount);
-    if (res) {
-        return res;
-    } else {
-        return bytecount;
-    }
-}
-
-#define DEFINE_STRUCT_OPERATION(OP, CONST) \
-static bool OP##_struct(CONST void *structp, size_t structsize) { \
-    size_t bytes_to_process = structsize; \
-\
-    /* proceed bytewise (int8_t*) */ \
-    CONST int8_t *hdrp = structp; \
-    while (bytes_to_process > 0) { \
-        ssize_t this_run = bev_##OP(bufevent, hdrp, bytes_to_process); \
-        if (this_run <= 0) { \
-            if (errno == EAGAIN || errno == EINTR) { \
-                continue; \
-            } \
-            return false; \
-        } \
-\
-        bytes_to_process -= this_run; \
-        hdrp += this_run; \
-    } \
-    /* no negative values (overreads) */ \
-    assert(bytes_to_process == 0); \
-\
-    return true; \
-}
-
-DEFINE_STRUCT_OPERATION(read,);
-DEFINE_STRUCT_OPERATION(write, const);
-
-int32_t rcv_message_type() {
+int32_t rcv_message_type_evbuf(struct bufferevent *state) {
     struct unxsock_msg rcvd_hdr;
-    if (!read_struct(&rcvd_hdr, sizeof(rcvd_hdr)) ||
-            rcvd_hdr.um_ver > USOCK_VERSION) {
+    if (!read_struct(state, &rcvd_hdr, sizeof(rcvd_hdr))) {
         return -errno;
     }
-    if (rcvd_hdr.um_msgid < 0) {
+    if (rcvd_hdr.um_ver > USOCK_VERSION || rcvd_hdr.um_msgid < 0) {
         return -EINVAL;
     }
+    // now expect to read a whole struct of the requested type
+    set_watermark(state, rcvd_hdr.um_msgid);
     return rcvd_hdr.um_msgid;
 }
 
-static int send_message_type(int32_t msgid) {
+static int send_message_type_evbuf(struct bufferevent *state, int32_t msgid) {
     struct unxsock_msg send_hdr = {
         .um_ver = USOCK_VERSION,
         .um_msgid = msgid,
     };
-    if (!write_struct(&send_hdr, sizeof(send_hdr))) {
+    if (!write_struct(state, &send_hdr, sizeof(send_hdr))) {
         return -errno;
     }
     return 0;
 }
 
-int request_swarm_getshm() {
+int reply_swarm_getshm(struct bufferevent *state,
+        in_addr_t ip_addr, char *filename) {
     int res;
-    if ((res = send_message_type(SWARM_GETSHM))) {
-        return res;
-    }
-
-    //NOTE: Enable as soon as there is something to send
-    //struct getshm_msg to_send;
-
-    return 0;
-}
-
-int reply_swarm_getshm(in_addr_t ip_addr, char *filename) {
-    int res;
-    if ((res = send_message_type(SWARM_GETSHM_REPLY))) {
+    if ((res = send_message_type_evbuf(state, SWARM_GETSHM_REPLY))) {
         return res;
     }
 
@@ -180,93 +140,47 @@ int reply_swarm_getshm(in_addr_t ip_addr, char *filename) {
         .gr_filename_len = (uint32_t) retr_len
     };
 
-    if (!write_struct(&to_send, sizeof(to_send))) {
+    if (!write_struct(state, &to_send, sizeof(to_send))) {
         return -errno;
     }
 
-    if (!write_struct(filename, to_send.gr_filename_len)) {
-        return -errno;
-    }
-    return 0;
-}
-
-int request_hive_bind(uint32_t protocol, uint32_t port) {
-    int res;
-    if ((res = send_message_type(HIVE_BIND))) {
-        return res;
-    }
-
-    struct bind_msg to_send = {
-        .bm_protocol = protocol,
-        .bm_resource = port,
-    };
-    if (!write_struct(&to_send, sizeof(to_send))) {
+    if (!write_struct(state, filename, to_send.gr_filename_len)) {
         return -errno;
     }
     return 0;
 }
 
-int reply_hive_bind(int32_t result) {
+int reply_hive_bind(struct bufferevent *state, int32_t result) {
     int res;
-    if ((res = send_message_type(HIVE_BIND_REPLY))) {
+    if ((res = send_message_type_evbuf(state, HIVE_BIND_REPLY))) {
         return res;
     }
 
     struct bind_rep to_send = {
         .br_result = result,
     };
-    if (!write_struct(&to_send, sizeof(to_send))) {
+    if (!write_struct(state, &to_send, sizeof(to_send))) {
         return -errno;
     }
     return 0;
 }
 
-int rcv_request_swarm_getshm() {
+int rcv_request_swarm_getshm(struct bufferevent *state) {
     /* fill in something as soon as required */
+    reset_watermark(state);
     return 0;
 }
 
-int rcv_reply_swarm_getshm(in_addr_t *ip_addr, char **filename) {
-    struct getshm_rep to_rcv = {};
-    if (!read_struct(&to_rcv, sizeof(to_rcv))) {
-        return -errno;
-    }
-
-    assert(sizeof(size_t) >= sizeof(uint32_t));
-    size_t rcvd_filename_size = to_rcv.gr_filename_len + 1;
-    char *rcvd_filename = malloc(rcvd_filename_size);
-    if (!rcvd_filename) {
-        // this error code means something like "computer on fire"
-        return -1;
-    }
-    memset(rcvd_filename, 0, rcvd_filename_size);
-
-    if (!read_struct(rcvd_filename, to_rcv.gr_filename_len)) {
-        return -errno;
-    }
-
-    *ip_addr = to_rcv.gr_ip_address;
-    *filename = rcvd_filename;
-    return 0;
-}
-
-int rcv_request_hive_bind(uint32_t *protocol, uint32_t *port) {
+int rcv_request_hive_bind(struct bufferevent *state,
+        uint32_t *protocol, uint32_t *port) {
     struct bind_msg to_rcv = {};
-    if (!read_struct(&to_rcv, sizeof(to_rcv))) {
+    if (!read_struct(state, &to_rcv, sizeof(to_rcv))) {
         return -errno;
     }
+    reset_watermark(state);
 
     *protocol = to_rcv.bm_protocol;
     *port = to_rcv.bm_resource;
     return 0;
 }
 
-int rcv_reply_hive_bind(int32_t *result) {
-    struct bind_rep to_rcv = {};
-    if (!read_struct(&to_rcv, sizeof(to_rcv))) {
-        return -errno;
-    }
-
-    *result = to_rcv.br_result;
-    return 0;
-}

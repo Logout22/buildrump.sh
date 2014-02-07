@@ -24,7 +24,7 @@
 #include <rump/rumpnet_if_pub.h>
 
 #include "swarm.h"
-#include "swarm_ipc.h"
+#include "swarm_client_ipc.h"
 
 static void __attribute__((__noreturn__))
 die(int e, const char *msg)
@@ -78,14 +78,14 @@ int main(int argc, char *argv[]) {
     }
 
     // initialise swarm_ipc
-    sipc_set_socket(unix_socket);
+    sipc_client_set_socket(unix_socket);
 
     if (request_swarm_getshm()) {
         ERR("Could request SHM\n");
         die(errno, "payload");
     }
 
-    if (rcv_message_type() != SWARM_GETSHM_REPLY) {
+    if (rcv_message_type_sock() != SWARM_GETSHM_REPLY) {
         ERR("Incompatible server\n");
         die(errno, "reply");
     }
@@ -144,7 +144,7 @@ int main(int argc, char *argv[]) {
     if ((res = request_hive_bind(PROTOCOL_TCP, portnum))) {
         die(-res, "explicit bind");
     }
-    if (rcv_message_type() != HIVE_BIND_REPLY) {
+    if (rcv_message_type_sock() != HIVE_BIND_REPLY) {
         ERR("Incompatible bind server\n");
         die(errno, "bind reply");
     }

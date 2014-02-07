@@ -37,7 +37,7 @@ static bool OP##_struct(CONST void *structp, size_t structsize) { \
     /* proceed bytewise (int8_t*) */ \
     CONST int8_t *hdrp = structp; \
     while (bytes_to_process > 0) { \
-        ssize_t this_run = OP(bufevent, hdrp, bytes_to_process); \
+        ssize_t this_run = OP(this_socket, hdrp, bytes_to_process); \
         if (this_run <= 0) { \
             if (errno == EAGAIN || errno == EINTR) { \
                 continue; \
@@ -59,11 +59,10 @@ DEFINE_STRUCT_OPERATION(write, const);
 
 int32_t rcv_message_type_sock() {
     struct unxsock_msg rcvd_hdr;
-    if (!read_struct(&rcvd_hdr, sizeof(rcvd_hdr)) ||
-            rcvd_hdr.um_ver > USOCK_VERSION) {
+    if (!read_struct(&rcvd_hdr, sizeof(rcvd_hdr))) {
         return -errno;
     }
-    if (rcvd_hdr.um_msgid < 0) {
+    if (rcvd_hdr.um_ver > USOCK_VERSION || rcvd_hdr.um_msgid < 0) {
         return -EINVAL;
     }
     return rcvd_hdr.um_msgid;
@@ -82,7 +81,7 @@ static int send_message_type_sock(int32_t msgid) {
 
 int request_swarm_getshm() {
     int res;
-    if ((res = send_message_type(SWARM_GETSHM))) {
+    if ((res = send_message_type_sock(SWARM_GETSHM))) {
         return res;
     }
 
@@ -94,7 +93,7 @@ int request_swarm_getshm() {
 
 int request_hive_bind(uint32_t protocol, uint32_t port) {
     int res;
-    if ((res = send_message_type(HIVE_BIND))) {
+    if ((res = send_message_type_sock(HIVE_BIND))) {
         return res;
     }
 

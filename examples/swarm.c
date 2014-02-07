@@ -45,7 +45,7 @@
 #include <glib.h>
 
 #include "swarm.h"
-#include "swarm_ipc.h"
+#include "swarm_server_ipc.h"
 #include "hive.h"
 #include "shmifvar.h"
 
@@ -90,6 +90,8 @@ struct tmpbus {
     int tmpbus_wd;
     struct shmif_mem *tmpbus_header;
     struct shmif_handle *tmpbus_position;
+    struct bufferevent *tmpbus_bev;
+    int32_t tmpbus_lastmsg;
 };
 
 static int unix_socket = 0, tapfd = 0, inotify_hdl = 0;
@@ -100,7 +102,7 @@ static GHashTable *busses = NULL;
 static struct event_base *ev_base;
 static bool hive_initialised = false;
 
-static void __attribute__((__noreturn__))
+void __attribute__((__noreturn__))
 die(int e, const char *msg)
 {
     if (msg)
@@ -116,6 +118,9 @@ cleanup_sig(int signum) {
 void deallocate_bus(gpointer dataptr) {
     struct tmpbus *busptr = dataptr;
 
+    if (busptr->tmpbus_bev) {
+        deallocate_bufferevent(busptr->tmpbus_bev);
+    }
     if (busptr->tmpbus_header) {
         munmap(busptr->tmpbus_header, BUSMEM_SIZE);
     }
@@ -137,14 +142,6 @@ struct tmpbus *allocate_bus() {
     result->tmpbus_position = malloc(sizeof(struct shmif_handle));
     assert(result->tmpbus_position);
     memset(result, 0, sizeof(struct shmif_handle));
-    strcpy(result->tmpbus_name, "busXXXXXX");
-    result->tmpbus_hdl = mkstemp(result->tmpbus_name);
-    if (result->tmpbus_hdl <= 0) {
-        result->tmpbus_hdl = 0;
-        deallocate_bus(result);
-        die(errno, "open tmpbus");
-    }
-
     return result;
 }
 
@@ -286,7 +283,17 @@ shmif_unlockbus(struct shmif_mem *busmem)
     assert(old == LOCK_LOCKED);
 }
 
-int initbus(struct tmpbus *newbus) {
+int initbus(struct tmpbus *newbus, struct bufferevent *bev) {
+    newbus->tmpbus_bev = bev;
+
+    strcpy(newbus->tmpbus_name, "busXXXXXX");
+    newbus->tmpbus_hdl = mkstemp(newbus->tmpbus_name);
+    if (newbus->tmpbus_hdl <= 0) {
+        newbus->tmpbus_hdl = 0;
+        deallocate_bus(newbus);
+        die(errno, "open tmpbus");
+    }
+
     if (ftruncate(newbus->tmpbus_hdl, BUSMEM_SIZE) != 0) {
         ERR("ftruncate failed\n");
         return errno;
@@ -549,69 +556,8 @@ void handle_tapread(evutil_socket_t sockfd, short events, void *ignore) {
     }
 }
 
-void handle_unixread(evutil_socket_t sockfd, short events, void *data) {
-    struct tmpbus *thisbus = (struct tmpbus*) data;
-
-    int res;
-    if ((res = rcv_message_type(sockfd)) <= 0) {
-        goto unixread_error;
-    }
-
-    switch(res) {
-        case HIVE_BIND:
-            {
-                uint32_t protocol, resource;
-                if ((res = rcv_request_hive_bind(
-                                sockfd, &protocol, &resource))) {
-                    goto unixread_error;
-                }
-                register_connection(
-                        sockfd, thisbus->tmpbus_wd, protocol, resource);
-            }
-            break;
-    }
-    return;
-
-unixread_error:
-    ERR("Received garbage: %d -- closing\n", res);
-    deallocate_watch(GINT_TO_POINTER(thisbus->tmpbus_wd));
-    deallocate_bus(thisbus);
-    close(sockfd);
-    return;
-}
-
-#if 0
-#define PREAMBLE "rumpuser_shmif_lock_"
-/* includes terminating 0: */
-#define PREAMBLE_LEN 21
-#endif
-
-void unix_accept(evutil_socket_t sock, short events, void *ignore) {
-    int fd = accept(sock, NULL, 0);
-
-    if (fd <= 0) {
-        die(errno, "accept");
-        return;
-    } else if (fd > FD_SETSIZE) {
-        close(fd);
-        return;
-    }
-
-    //evutil_make_socket_nonblocking(fd);
-
-    /* handle clients one by one
-     * to avoid races on the process table
-     * (registering is not done often, so no need to hurry)
-     */
-    int res;
-    if ((res = rcv_message_type(fd)) != SWARM_GETSHM) {
-        ERR("Invalid GETSHM message: %d. Closing.\n", -res);
-        close(fd);
-        return;
-    }
-
+void insert_new_bus(struct tmpbus *newbus, struct bufferevent *bev) {
     ERR("Creating Bus\n");
-    struct tmpbus *newbus = allocate_bus();
 
 #if 0
     ERR("Creating semaphore\n");
@@ -630,7 +576,7 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
 	assert(newbus->tmpbus_lock != SEM_FAILED);
 #endif
 
-    if (initbus(newbus) != 0) {
+    if (initbus(newbus, bev) != 0) {
         deallocate_bus(newbus);
         die(errno, "init tmpbus");
     }
@@ -644,6 +590,7 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
     }
     newbus->tmpbus_wd = new_wd;
 
+#if 0
     newbus->tmpbus_event = event_new(
             ev_base, fd, EV_READ|EV_PERSIST,
             handle_unixread, newbus);
@@ -651,21 +598,84 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
         die(0, "new bus event_new");
     }
     event_add(newbus->tmpbus_event, NULL);
-
-    //TODO proper ordering
-    //sleep(5);
+#endif
 
     // now answer the client with the bus file name
+    int res;
     if ((res = reply_swarm_getshm(
-                fd, ip_addr_num, newbus->tmpbus_name))) {
+                bev, ip_addr_num, newbus->tmpbus_name))) {
         deallocate_bus(newbus);
         ERR("Error replying the client side: %d\n", -res);
-        close(fd);
         return;
     }
 
     g_hash_table_insert(
             busses, GINT_TO_POINTER(new_wd), newbus);
+}
+
+void handle_unixread(struct bufferevent *bev, void *data) {
+    struct tmpbus *thisbus = (struct tmpbus*) data;
+
+    int res;
+    if (!thisbus->tmpbus_lastmsg) {
+        if ((thisbus->tmpbus_lastmsg = rcv_message_type_evbuf(bev)) <= 0) {
+            res = thisbus->tmpbus_lastmsg;
+            goto unixread_error;
+        }
+        if (evbuffer_get_length(bufferevent_get_input(bev)) >
+                sipc_struct_size(thisbus->tmpbus_lastmsg)) {
+            // great, we can already proceed to stage 2
+            handle_unixread(bev, data);
+        }
+    } else {
+        switch(thisbus->tmpbus_lastmsg) {
+            case SWARM_GETSHM:
+                {
+                    insert_new_bus(thisbus, bev);
+                }
+                break;
+            case HIVE_BIND:
+                if (thisbus->tmpbus_wd) {
+                    uint32_t protocol, resource;
+                    if ((res = rcv_request_hive_bind(
+                                    bev, &protocol, &resource))) {
+                        goto unixread_error;
+                    }
+                    register_connection(
+                            bev, thisbus->tmpbus_wd, protocol, resource);
+                } else {
+                    reply_hive_bind(bev, -1);
+                }
+                break;
+        }
+        thisbus->tmpbus_lastmsg = 0;
+    }
+    return;
+
+unixread_error:
+    ERR("Received garbage: %d -- closing\n", res);
+    g_hash_table_remove(busses, GINT_TO_POINTER(thisbus->tmpbus_wd));
+    return;
+}
+
+void unix_accept(evutil_socket_t sock, short events, void *ignore) {
+    int fd = accept(sock, NULL, 0);
+
+    if (fd <= 0) {
+        die(errno, "accept");
+        return;
+    } else if (fd > FD_SETSIZE) {
+        close(fd);
+        return;
+    }
+
+    evutil_make_socket_nonblocking(fd);
+
+    struct tmpbus *newbus = allocate_bus();
+    initialise_bufferevent(
+            ev_base, fd, handle_unixread, newbus);
+
+    // on freeing the buffer event, the socket will be closed
 }
 
 int main(int argc, char *argv[]) {

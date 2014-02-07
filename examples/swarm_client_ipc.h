@@ -9,7 +9,7 @@ void sipc_client_set_socket(int sock);
  * Request a shared memory area for packet transfer.
  * \returns 0 on success, a negative error code otherwise
  */
-int request_swarm_getshm();
+int request_swarm_getshm(void);
 
 /**
  * Request a connection.
@@ -25,7 +25,7 @@ int request_hive_bind(uint32_t protocol, uint32_t port);
  * one of the other \c rcv_XYZ functions.
  * \returns the message type ID or a negative error code
  */
-int32_t rcv_message_type_sock();
+int32_t rcv_message_type_sock(void);
 
 int rcv_reply_swarm_getshm(in_addr_t *ip_addr, char **filename);
 
