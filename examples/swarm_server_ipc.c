@@ -1,4 +1,4 @@
-#include "swarm_ipc.h"
+#include "swarm_server_ipc.h"
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,34 +11,6 @@
 #include <event2/bufferevent.h>
 
 #include <stdio.h>
-
-struct unxsock_msg {
-    uint32_t um_ver;
-    int32_t um_msgid;
-};
-
-struct getshm_msg {
-    // nothing to send so far
-};
-
-struct getshm_rep {
-    in_addr_t gr_ip_address;
-    uint32_t gr_filename_len;
-    /*
-     * The protocol requires the sender to supply
-     * gr_filename_len bytes of data for the client
-     * following this structure (Version 1).
-     */
-};
-
-struct bind_msg {
-    uint32_t bm_protocol;
-    uint32_t bm_resource;
-};
-
-struct bind_rep {
-    int32_t br_result;
-};
 
 static struct sipc_state *default_state = NULL;
 static bool exit_handler_registered = false;
