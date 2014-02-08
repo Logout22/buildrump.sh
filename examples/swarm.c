@@ -622,7 +622,8 @@ void handle_unixread(struct bufferevent *bev, void *data) {
             res = thisbus->tmpbus_lastmsg;
             goto unixread_error;
         }
-        if (evbuffer_get_length(bufferevent_get_input(bev)) >
+        ERR("Received UNXSOCK message type %d\n", thisbus->tmpbus_lastmsg);
+        if (evbuffer_get_length(bufferevent_get_input(bev)) >=
                 sipc_struct_size(thisbus->tmpbus_lastmsg)) {
             // great, we can already proceed to stage 2
             handle_unixread(bev, data);
@@ -672,6 +673,7 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
     evutil_make_socket_nonblocking(fd);
 
     struct tmpbus *newbus = allocate_bus();
+    ERR("Creating new bufferevent\n");
     initialise_bufferevent(
             ev_base, fd, handle_unixread, newbus);
 

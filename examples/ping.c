@@ -80,11 +80,13 @@ int main(int argc, char *argv[]) {
     // initialise swarm_ipc
     sipc_client_set_socket(unix_socket);
 
+    ERR("request SHM\n");
     if (request_swarm_getshm()) {
         ERR("Could request SHM\n");
         die(errno, "payload");
     }
 
+    ERR("Fetching answer\n");
     if (rcv_message_type_sock() != SWARM_GETSHM_REPLY) {
         ERR("Incompatible server\n");
         die(errno, "reply");

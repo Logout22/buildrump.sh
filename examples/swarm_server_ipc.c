@@ -55,13 +55,13 @@ void deallocate_bufferevent(struct bufferevent *oldstate) {
 static void reset_watermark(struct bufferevent *state) {
     // first receive a message header
     bufferevent_setwatermark(
-            state, EV_READ, sizeof(struct unxsock_msg ), SIZE_MAX);
+            state, EV_READ, sizeof(struct unxsock_msg), 0);
 }
 
 static void set_watermark(struct bufferevent *state, int32_t msgid) {
     // now expect to read a whole struct of the requested type
     bufferevent_setwatermark(state, EV_READ,
-            sipc_struct_size(msgid), SIZE_MAX);
+            sipc_struct_size(msgid), 0);
 }
 
 struct bufferevent *initialise_bufferevent(
