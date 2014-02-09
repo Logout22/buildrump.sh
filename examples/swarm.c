@@ -141,7 +141,7 @@ struct tmpbus *allocate_bus() {
     // essential field initialisation:
     result->tmpbus_position = malloc(sizeof(struct shmif_handle));
     assert(result->tmpbus_position);
-    memset(result, 0, sizeof(struct shmif_handle));
+    memset(result->tmpbus_position, 0, sizeof(struct shmif_handle));
     return result;
 }
 
@@ -307,13 +307,22 @@ int initbus(struct tmpbus *newbus, struct bufferevent *bev) {
         return errno;
     }
 
-    shmif_lockbus(hdr);
-	if (hdr->shm_magic == 0) {
-        hdr->shm_magic = SHMIF_MAGIC;
-        hdr->shm_first = BUSMEM_DATASIZE;
-        //hdr->shm_lock = LOCK_LOCKED;
+	/*
+	 * Prefault in pages to minimize runtime penalty with buslock.
+	 */
+    volatile uint8_t v, *p;
+    long pagesize = sysconf(_SC_PAGESIZE);
+	for (p = (uint8_t*) hdr;
+	    p < ((uint8_t*) hdr) + BUSMEM_SIZE;
+	    p += pagesize) {
+		v = *p;
+        (void)v;
     }
-    shmif_unlockbus(hdr);
+
+    hdr->shm_magic = SHMIF_MAGIC;
+    hdr->shm_gen = 0;
+    hdr->shm_first = BUSMEM_DATASIZE;
+    hdr->shm_lock = LOCK_UNLOCKED;
 
     newbus->tmpbus_header = hdr;
     return 0;
