@@ -109,8 +109,10 @@ int main(int argc, char *argv[]) {
 
     ERR("Setting IP address %s\n", ip_address_str);
     rump_pub_netconfig_ipv4_ifaddr(
-            "shmif0", ip_address_str, "255.255.255.0");
-    rump_pub_netconfig_ifup("shmif0");
+            "shmif0", ip_address_str, "255.255.255.255");
+    if (rump_pub_netconfig_ifup("shmif0") < 0) {
+        die(errno, "ipup");
+    }
 
     ERR("Creating Socket\n");
     tcpsock = rump_sys_socket(PF_INET, SOCK_STREAM, 0);
@@ -118,7 +120,7 @@ int main(int argc, char *argv[]) {
         die(errno, "socket");
     }
 
-    char const *srv_address = "10.93.49.2";
+    char const *srv_address = "10.93.49.100";
     long req_port = 26420;
     if (argc > 1) {
         req_port = strtol(argv[1], NULL, 0);
