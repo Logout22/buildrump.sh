@@ -19,9 +19,11 @@
 #define EQIP(A, B) (memcmp((A), (B), 4) == 0)
 #define EQMAC(A, B) (memcmp((A), (B), 6) == 0)
 
+struct bufferevent;
+
 void init_hive(in_addr_t ip_address, uint8_t *cur_mac_address);
 void shutdown_hive();
-void register_connection(int, int, uint32_t, uint32_t);
+void register_connection(struct bufferevent*, int, uint32_t, uint32_t);
 int pass_for_frame(void*,int,bool);
 void remove_ports_for_watch(int);
 

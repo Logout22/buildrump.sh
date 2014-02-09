@@ -1,6 +1,6 @@
 #include "hive.h"
 #include "swarm.h"
-#include "swarm_ipc.h"
+#include "swarm_server_ipc.h"
 
 #include <stdio.h>
 #include <glib.h>
@@ -37,7 +37,6 @@ void shutdown_hive() {
 #define CMASK(P, M, S) ((*((uint8_t*) (P)) & (M)) >> (S))
 #define OFFSET(P, N) (((uint8_t*) (P)) + (N))
 
-extern bool dbg_dieafter;
 static void send_arp_reply(void *packet,
         uint8_t *srcmac, uint8_t *srcip) {
     // TODO add IPv6 support
@@ -57,7 +56,6 @@ static void send_arp_reply(void *packet,
     CPYMAC(curptr, srcmac);
     curptr += MAC_LEN;
     CPYIP(curptr, srcip);
-    //dbg_dieafter = true;
 }
 
 static int handle_arp(void *packet, bool outgoing) {
@@ -189,10 +187,11 @@ static int lookup_dest_bus(uint16_t dest_port, int table_idx) {
         pass = GPOINTER_TO_INT(value);
     }
 
+    ERR("%u goes to %d\n", dest_port, pass);
     return pass;
 }
 
-void register_connection(int socket, int bus_id,
+void register_connection(struct bufferevent *bev, int bus_id,
         uint32_t protocol, uint32_t resource) {
     int32_t result = -1;
     if (protocol < 2 && resource <= UINT16_MAX &&
@@ -204,7 +203,8 @@ void register_connection(int socket, int bus_id,
                 GINT_TO_POINTER(bus_id));
         result = 0;
     }
-    reply_hive_bind(socket, result);
+    ERR("registered %u/%u for %d\n", protocol, resource, bus_id);
+    reply_hive_bind(bev, result);
 }
 
 static int pass_for_port_local(int srcbus_id,
@@ -248,7 +248,7 @@ int pass_for_frame(void *frame, int srcbus_id, bool outgoing) {
                     !(outgoing && !EQIP(&pktipm.ipm_sender, &ip_address))) {
                     // TODO add broadcast/multicast/... addresses
                     //FIXME dirty hack, replace ASAP
-                    uint8_t custommac[] = {0xB2, 0xA0, 0x30, 0xC8, 0x82, 0xC2};
+                    uint8_t custommac[] = {0xB2, 0xA0, 0xEB, 0xE7, 0xD9, 0x3D};
                     CPYMAC(frame, custommac);
                     pass = pass_for_port_local(
                             srcbus_id,
