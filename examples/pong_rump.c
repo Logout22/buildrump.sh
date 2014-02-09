@@ -118,7 +118,7 @@ int main(int argc, char *argv[]) {
         die(errno, "socket");
     }
 
-    char const *srv_address = "10.93.49.100";
+    char const *srv_address = "10.93.49.2";
     long req_port = 26420;
     if (argc > 1) {
         req_port = strtol(argv[1], NULL, 0);

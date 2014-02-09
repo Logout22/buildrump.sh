@@ -187,6 +187,7 @@ static int lookup_dest_bus(uint16_t dest_port, int table_idx) {
         pass = GPOINTER_TO_INT(value);
     }
 
+    ERR("%u goes to %d\n", dest_port, pass);
     return pass;
 }
 
@@ -202,6 +203,7 @@ void register_connection(struct bufferevent *bev, int bus_id,
                 GINT_TO_POINTER(bus_id));
         result = 0;
     }
+    ERR("registered %u/%u for %d\n", protocol, resource, bus_id);
     reply_hive_bind(bev, result);
 }
 
@@ -246,7 +248,7 @@ int pass_for_frame(void *frame, int srcbus_id, bool outgoing) {
                     !(outgoing && !EQIP(&pktipm.ipm_sender, &ip_address))) {
                     // TODO add broadcast/multicast/... addresses
                     //FIXME dirty hack, replace ASAP
-                    uint8_t custommac[] = {0xB2, 0xA0, 0x30, 0xC8, 0x82, 0xC2};
+                    uint8_t custommac[] = {0xB2, 0xA0, 0xEB, 0xE7, 0xD9, 0x3D};
                     CPYMAC(frame, custommac);
                     pass = pass_for_port_local(
                             srcbus_id,

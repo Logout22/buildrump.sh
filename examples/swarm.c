@@ -541,7 +541,6 @@ void handle_tapread(evutil_socket_t sockfd, short events, void *ignore) {
         if (pass == FRAME_TO_TAP) {
             write(tapfd, readbuf, pktlen);
         } else if (pass == FRAME_TO_ALL) {
-            printf("here\n");
             send_frame_to_all(readbuf, pktlen);
         } else if (pass != DROP_FRAME) {
             struct tmpbus *destbus = (struct tmpbus*)
@@ -550,6 +549,7 @@ void handle_tapread(evutil_socket_t sockfd, short events, void *ignore) {
                 ERR("tapread: Invalid bus at ID %d\n", pass);
                 die(226, NULL);
             }
+            ERR("Sending to bus %d\n", pass);
             writebus((struct tmpbus*) destbus,
                     readbuf, pktlen);
         }
