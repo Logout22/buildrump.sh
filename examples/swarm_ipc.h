@@ -27,6 +27,7 @@ struct getshm_msg {
 };
 
 struct getshm_rep {
+    uint8_t gr_mac_address[6];
     in_addr_t gr_ip_address;
     uint32_t gr_filename_len;
     /*

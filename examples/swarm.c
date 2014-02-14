@@ -609,10 +609,15 @@ void insert_new_bus(struct tmpbus *newbus, struct bufferevent *bev) {
     event_add(newbus->tmpbus_event, NULL);
 #endif
 
+	uint8_t enaddr[6] = { 0xb2, 0xa0, 0x00, 0x00, 0x00, 0x00 };
+	//randnum = cprng_fast32();
+    //randnum = 0x3dd9e7eb;
+	memcpy(&enaddr[2], &new_wd, sizeof(new_wd));
+
     // now answer the client with the bus file name
     int res;
-    if ((res = reply_swarm_getshm(
-                bev, ip_addr_num, newbus->tmpbus_name))) {
+    if ((res = reply_swarm_getshm(bev,
+                enaddr, ip_addr_num, newbus->tmpbus_name))) {
         deallocate_bus(newbus);
         ERR("Error replying the client side: %d\n", -res);
         return;

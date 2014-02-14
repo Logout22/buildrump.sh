@@ -27,7 +27,8 @@ int request_hive_bind(uint32_t protocol, uint32_t port);
  */
 int32_t rcv_message_type_sock(void);
 
-int rcv_reply_swarm_getshm(in_addr_t *ip_addr, char **filename);
+int rcv_reply_swarm_getshm(
+        uint8_t **mac_addr, in_addr_t *ip_addr, char **filename);
 
 int rcv_reply_hive_bind(int32_t *result);
 

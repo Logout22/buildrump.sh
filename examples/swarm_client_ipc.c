@@ -107,11 +107,19 @@ int request_hive_bind(uint32_t protocol, uint32_t port) {
     return 0;
 }
 
-int rcv_reply_swarm_getshm(in_addr_t *ip_addr, char **filename) {
+int rcv_reply_swarm_getshm(
+        uint8_t **mac_addr, in_addr_t *ip_addr, char **filename) {
     struct getshm_rep to_rcv = {};
     if (!read_struct(&to_rcv, sizeof(to_rcv))) {
         return -errno;
     }
+    char *rcvd_macaddr = malloc(sizeof(to_rcv.gr_mac_address));
+    if (!rcvd_macaddr) {
+        // this error code means something like "computer on fire"
+        return -1;
+    }
+    memcpy(rcvd_macaddr, to_rcv.gr_mac_address,
+            sizeof(to_rcv.gr_mac_address));
 
     assert(sizeof(size_t) >= sizeof(uint32_t));
     size_t rcvd_filename_size = to_rcv.gr_filename_len + 1;
@@ -126,6 +134,7 @@ int rcv_reply_swarm_getshm(in_addr_t *ip_addr, char **filename) {
         return -errno;
     }
 
+    *mac_addr = rcvd_macaddr;
     *ip_addr = to_rcv.gr_ip_address;
     *filename = rcvd_filename;
     return 0;

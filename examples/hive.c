@@ -247,14 +247,14 @@ int pass_for_frame(void *frame, int srcbus_id, bool outgoing) {
                     /* make sure packets are not re-sent: */
                     !(outgoing && !EQIP(&pktipm.ipm_sender, &ip_address))) {
                     // TODO add broadcast/multicast/... addresses
-                    //FIXME dirty hack, replace ASAP
-                    uint8_t custommac[] = {0xB2, 0xA0, 0xEB, 0xE7, 0xD9, 0x3D};
-                    CPYMAC(frame, custommac);
                     pass = pass_for_port_local(
                             srcbus_id,
                             pktcd.cd_source_port,
                             pktcd.cd_dest_port,
                             outgoing, is_tcp);
+                    uint8_t custommac[] = {0xB2, 0xA0, 0x00, 0x00, 0x00, 0x00};
+                    memcpy(&custommac[2], &pass, sizeof(pass));
+                    CPYMAC(frame, custommac);
                 } else {
                     if (outgoing && EQIP(&pktipm.ipm_sender, &ip_address)) {
                         // this is not for our realm -- send it out

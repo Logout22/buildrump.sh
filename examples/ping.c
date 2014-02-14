@@ -93,8 +93,9 @@ int main(int argc, char *argv[]) {
     }
 
     char *filename;
+    uint8_t *mac_addr;
     in_addr_t ip_address;
-    if (rcv_reply_swarm_getshm(&ip_address, &filename) < 0) {
+    if (rcv_reply_swarm_getshm(&mac_addr, &ip_address, &filename) < 0) {
         ERR("Could not read reply\n");
         die(errno, "read");
     }
@@ -107,7 +108,8 @@ int main(int argc, char *argv[]) {
     }
 
     ERR("Creating Bus\n");
-    rump_pub_shmif_create(filename, 0);
+    rump_pub_shmif_create(filename, 0, (char*) mac_addr);
+    free(mac_addr);
     free(filename);
 
     char const *ip_address_str = inet_ntoa(
