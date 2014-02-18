@@ -115,7 +115,7 @@ int main(int argc, char *argv[]) {
 
     ERR("Setting IP address %s\n", ip_address_str);
     rump_pub_netconfig_ipv4_ifaddr(
-            "shmif0", ip_address_str, "255.255.255.0");
+            "shmif0", ip_address_str, "255.255.255.255");
     rump_pub_netconfig_ifup("shmif0");
 
     ERR("Creating Socket\n");
@@ -141,22 +141,7 @@ int main(int argc, char *argv[]) {
     // listen from all addresses
     memset(&sin.sin_addr, 0, sizeof(sin.sin_addr));
 
-    //TODO remove ASA implicit bind works
-    int res;
-    if ((res = request_hive_bind(PROTOCOL_TCP, portnum))) {
-        die(-res, "explicit bind");
-    }
-    if (rcv_message_type_sock() != HIVE_BIND_REPLY) {
-        ERR("Incompatible bind server\n");
-        die(errno, "bind reply");
-    }
-    rcv_reply_hive_bind(&res);
-    if (res) {
-        die(-res, "explicit bind fail");
-    }
-    //END TODO
-
-    res = rump_sys_bind(tcpsock, (struct sockaddr*) &sin, sizeof(sin));
+    int res = rump_sys_bind(tcpsock, (struct sockaddr*) &sin, sizeof(sin));
     if (res != 0) {
         die(errno, "bind");
     }
