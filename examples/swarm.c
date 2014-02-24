@@ -75,7 +75,7 @@ struct shmif_handle {
     uint32_t sc_nextpacket;
 };
 
-#define TMPBUS_NAME_LEN 10
+#define TMPBUS_NAME_LEN 256
 
 /* NOTE: Do NOT instantiate struct tmpbus directly.
  * Use something like:
@@ -286,7 +286,10 @@ shmif_unlockbus(struct shmif_mem *busmem)
 int initbus(struct tmpbus *newbus, struct bufferevent *bev) {
     newbus->tmpbus_bev = bev;
 
-    strcpy(newbus->tmpbus_name, "busXXXXXX");
+    // default to the current directory
+    char *res = getcwd(newbus->tmpbus_name, 245);
+    assert(res == newbus->tmpbus_name);
+    strcat(newbus->tmpbus_name, "/busXXXXXX");
     newbus->tmpbus_hdl = mkstemp(newbus->tmpbus_name);
     if (newbus->tmpbus_hdl <= 0) {
         newbus->tmpbus_hdl = 0;

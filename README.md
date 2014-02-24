@@ -12,6 +12,8 @@ The interesting stuff is in the `examples/` directory.
 On Debian, you will need
 `pkg-config`, `libglib2.0-dev`, and `libevent-dev`.
 Other distributions may vary.
+Swarm also needs the directory `/opt/swarm` readable and writeable
+for the current user.
 
 Tools for building Rump Kernels [![Build Status](https://travis-ci.org/rumpkernel/buildrump.sh.png?branch=master)](https://travis-ci.org/rumpkernel/buildrump.sh)
 ===============================
