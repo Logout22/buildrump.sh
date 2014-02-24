@@ -208,10 +208,10 @@ checkcheckout ()
 
 	[ ! -z "${TARBALLMODE}" ] && return
 
-	if ! ${BRDIR}/checkout.sh checkcheckout ${SRCDIR} \
-	    && ! ${TITANMODE}; then
-		die 'revision mismatch, run checkout (or -H to override)'
-	fi
+#	if ! ${BRDIR}/checkout.sh checkcheckout ${SRCDIR} \
+#	    && ! ${TITANMODE}; then
+#		die 'revision mismatch, run checkout (or -H to override)'
+#	fi
 }
 
 maketools ()

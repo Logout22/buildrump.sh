@@ -1,3 +1,14 @@
+Note from Logout22
+==================
+
+Please use my custom NetBSD source repo, like so:
+
+	git clone git@github.com:Logout22/buildrump.sh rump
+	cd rump
+	git clone git@github.com:Logout22/rumpkernel-netbsd-src src
+
+This is kind of ugly, sorry (see examples/CRAPL-LICENSE.txt).
+
 Tools for building Rump Kernels [![Build Status](https://travis-ci.org/rumpkernel/buildrump.sh.png?branch=master)](https://travis-ci.org/rumpkernel/buildrump.sh)
 ===============================
 
@@ -53,7 +64,7 @@ package for your OS/distribution/architecture.  These packages will also
 install the POSIX hypercall implementation.
 
 * Void Linux: `xbps-install -S netbsd-rumpkernel`
-* Arch Linux: [pacman](https://build.opensuse.org/package/binaries/home:staal1978/rump?repository=Arch_Extra) (OBS), [AUR](https://aur.archlinux.org/packages/netbsd-rump-git/) 
+* Arch Linux: [pacman](https://build.opensuse.org/package/binaries/home:staal1978/rump?repository=Arch_Extra) (OBS), [AUR](https://aur.archlinux.org/packages/netbsd-rump-git/)
 * OpenSUSE Linux:
 12.3 [RPM](https://build.opensuse.org/package/binaries/home:staal1978/rump?repository=openSUSE_12.3) (OBS)
 || Tumbleweed [RPM](https://build.opensuse.org/package/binaries/home:staal1978/rump?repository=openSUSE_Factory) (OBS)
@@ -75,7 +86,7 @@ install the POSIX hypercall implementation.
 * Solaris: pkgsrc/misc/rump
 
 The links for some of packages are provided by the
-[openSUSE Build Service](https://build.opensuse.org/package/show?package=rump&project=home%3Astaal1978). 
+[openSUSE Build Service](https://build.opensuse.org/package/show?package=rump&project=home%3Astaal1978).
 You can download and install the packages manually, but it is highly recommended to add the OBS repositories for the right distro and architecture to the package manager. This way, updates and dependencies will be automatically resolved for other packages depending on rump kernels.
 
 
@@ -178,7 +189,7 @@ Continuous testing on Linux/amd64 + gcc/clang is done by
 [Travis CI](https://travis-ci.org/rumpkernel/buildrump.sh)
 for every commit.  [![Build Status](https://travis-ci.org/rumpkernel/buildrump.sh.png?branch=master)](https://travis-ci.org/rumpkernel/buildrump.sh)
 
-There is a broader platform CI testing for Linux _x86_ (32/64bit), _ARM_, _PowerPC_ (32/64bit), _MIPS_ (o32 ABI) and NetBSD _x86_ (32/64bit) [using buildbot](http://build.myriabit.eu:8011/waterfall). 
+There is a broader platform CI testing for Linux _x86_ (32/64bit), _ARM_, _PowerPC_ (32/64bit), _MIPS_ (o32 ABI) and NetBSD _x86_ (32/64bit) [using buildbot](http://build.myriabit.eu:8011/waterfall).
 
 Tested machine architectures include _x86_ (32/64bit), _ARM_, _PowerPC_
 (32/64bit), _MIPS_ (32bit) and _UltraSPARC_ (32/64bit).
