@@ -7,7 +7,11 @@ Please use my custom NetBSD source repo, like so:
 	cd rump
 	git clone git@github.com:Logout22/rumpkernel-netbsd-src src
 
-This is kind of ugly, sorry (see examples/CRAPL-LICENSE.txt).
+This is kind of ugly, sorry (see `examples/CRAPL-LICENSE.txt`).
+The interesting stuff is in the `examples/` directory.
+On Debian, you will need
+`pkg-config`, `libglib2.0-dev`, and `libevent-dev`.
+Other distributions may vary.
 
 Tools for building Rump Kernels [![Build Status](https://travis-ci.org/rumpkernel/buildrump.sh.png?branch=master)](https://travis-ci.org/rumpkernel/buildrump.sh)
 ===============================
