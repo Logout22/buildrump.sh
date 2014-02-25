@@ -64,10 +64,14 @@ uint8_t mac_addr[MAC_LEN];
     #define ETHERMTU ETH_DATA_LEN
 #endif
 
+#if 0
 #define ERR(...) { \
     fprintf(stderr, "swarm: "); \
     fprintf(stderr, __VA_ARGS__); \
 }
+#else
+#define ERR(...) (void)NULL;
+#endif
 
 // contains the variables necessary to maintain a read state:
 struct shmif_handle {

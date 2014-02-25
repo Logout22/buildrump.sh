@@ -7,10 +7,14 @@
 #include <inttypes.h>
 #include <assert.h>
 
+#if 0
 #define ERR(...) { \
     fprintf(stderr, "hive: "); \
     fprintf(stderr, __VA_ARGS__); \
 }
+#else
+#define ERR(...) (void)NULL;
+#endif
 
 static GHashTable *hive_table[2];
 static in_addr_t ip_address;
