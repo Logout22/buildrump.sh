@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <stropts.h>
+#include <dirent.h>
 
 #include <sys/cdefs.h>
 #include <sys/stat.h>
@@ -64,6 +65,8 @@ uint8_t mac_addr[MAC_LEN];
     #define ETHERMTU ETH_DATA_LEN
 #endif
 
+#define EQUALS(s1, s2) (strcmp((s1), (s2)) == 0)
+
 #if 0
 #define ERR(...) { \
     fprintf(stderr, "swarm: "); \
@@ -98,7 +101,7 @@ struct tmpbus {
     int32_t tmpbus_lastmsg;
 };
 
-static int unix_socket = 0, tapfd = 0, inotify_hdl = 0;
+static int unix_socket = -1, tapfd = -1, inotify_hdl = -1;
 static struct event *unix_socket_listener_event = NULL,
              *tap_listener_event = NULL,
              *inotify_listener_event = NULL;
@@ -168,15 +171,15 @@ void cleanup() {
     if (inotify_listener_event) {
         event_free(inotify_listener_event);
     }
-    if (unix_socket) {
+    if (unix_socket > 0) {
         //should be handled by swarm_ipc's bufevent:
         //close(unix_socket);
         unlink(SOCK_FN);
     }
-    if (inotify_hdl) {
+    if (inotify_hdl > 0) {
         close(inotify_hdl);
     }
-    if (tapfd) {
+    if (tapfd > 0) {
         close(tapfd);
     }
     if (ev_base) {
@@ -187,6 +190,11 @@ void cleanup() {
     }
 }
 
+#if 0
+/*
+ * this is the old Bridge/TAP code,
+ * see below for the current macvtap version
+ */
 int tun_alloc(char *dev)
 {
   struct ifreq ifr;
@@ -219,6 +227,62 @@ int tun_alloc(char *dev)
 
   strcpy(dev, ifr.ifr_name);
   return fd;
+}
+#endif
+
+int tun_alloc(int *resulting_fd) {
+    *resulting_fd = -1;
+
+    //find out current tap device name
+    DIR *macvtap_dir = opendir("/sys/class/macvtap");
+    if (macvtap_dir == NULL) {
+        return errno;
+    }
+
+    struct dirent dir_entry, *result = NULL;
+    int error = 0, fd;
+    do {
+        if ((error = readdir_r(macvtap_dir, &dir_entry, &result))) {
+            break;
+        }
+        if (result != NULL) {
+            char start_of_name[4];
+            strncpy(start_of_name, dir_entry.d_name, 3);
+
+            if (EQUALS(start_of_name, "tap")) {
+                char tap_device_filename[20];
+                strcpy(tap_device_filename, "/dev/");
+                strncat(tap_device_filename, dir_entry.d_name, 14);
+
+                fd = open(tap_device_filename, O_RDWR);
+                if (fd < 0) {
+                    error = errno;
+                }
+
+                // use the first available tap device
+                break;
+            }
+        }
+    } while (result != NULL);
+
+    closedir(macvtap_dir);
+    if (error) {
+        return error;
+    }
+
+    // now retrieve MAC address and exit
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    struct ifreq ifr = {
+        .ifr_name = "macvtap0"
+    };
+    if ((error = ioctl(sock, SIOCGIFHWADDR, &ifr)) < 0) {
+        close(fd);
+        return error;
+    }
+    CPYMAC(mac_addr, ifr.ifr_hwaddr.sa_data);
+
+    *resulting_fd = fd;
+    return 0;
 }
 
 static void
@@ -697,6 +761,7 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
 }
 
 int main(int argc, char *argv[]) {
+    die(0, "TODO: Make IP address parameter, find and fix memory leak");
     atexit(cleanup);
     struct sigaction sigact = {
         .sa_handler = cleanup_sig
@@ -716,11 +781,10 @@ int main(int argc, char *argv[]) {
     }
 
     ERR("Allocating TAP device\n");
-    char devname[] = "tun0";
-    tapfd = tun_alloc(devname);
-    if (tapfd <= 0) {
-        tapfd = 0;
-        die(errno, "open tap");
+    int error = tun_alloc(&tapfd);
+    if (tapfd < 0) {
+        tapfd = -1;
+        die(error, "open tap");
     }
     ip_addr_num = inet_addr(IP_ADDRESS);
     init_hive(ip_addr_num, mac_addr);
