@@ -50,7 +50,6 @@
 #include "hive.h"
 #include "shmifvar.h"
 
-#define IP_ADDRESS "10.93.49.100"
 in_addr_t ip_addr_num;
 uint8_t mac_addr[MAC_LEN];
 
@@ -761,7 +760,6 @@ void unix_accept(evutil_socket_t sock, short events, void *ignore) {
 }
 
 int main(int argc, char *argv[]) {
-    die(0, "TODO: Make IP address parameter, find and fix memory leak");
     atexit(cleanup);
     struct sigaction sigact = {
         .sa_handler = cleanup_sig
@@ -786,7 +784,10 @@ int main(int argc, char *argv[]) {
         tapfd = -1;
         die(error, "open tap");
     }
-    ip_addr_num = inet_addr(IP_ADDRESS);
+    if (argc < 2) {
+        die(0, "Please supply an IP address for Swarm.");
+    }
+    ip_addr_num = inet_addr(argv[1]);
     init_hive(ip_addr_num, mac_addr);
     hive_initialised = true;
 
