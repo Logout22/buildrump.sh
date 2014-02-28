@@ -9,11 +9,15 @@ Please use my custom NetBSD source repo, like so:
 
 This is kind of ugly, sorry (see `examples/CRAPL-LICENSE.txt`).
 The interesting stuff is in the `examples/` directory.
-On Debian, you will need
+On Debian, you will need `bridge-utils`,
 `pkg-config`, `libglib2.0-dev`, and `libevent-dev`.
 Other distributions may vary.
-Swarm also needs the directory `/opt/swarm` and a macvtap device
+Swarm also needs the directory `/opt/swarm`
 readable and writeable for the current user.
+Before running Swarm, adapt `setup-bridge` to your system and execute it
+(which will probably require root priviledges).
+You can reverse that setup using `teardown-bridge`, which you will also
+have to adapt before running it.
 
 Tools for building Rump Kernels [![Build Status](https://travis-ci.org/rumpkernel/buildrump.sh.png?branch=master)](https://travis-ci.org/rumpkernel/buildrump.sh)
 ===============================

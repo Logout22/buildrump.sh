@@ -1,0 +1,9 @@
+#! /bin/bash
+ip link delete tun0
+ip link set br0 down
+brctl delbr br0
+#enable your DHCP client, like so
+#dhclient -v \
+#-pf /run/dhclient.eth0.pid \
+#-lf /var/lib/dhcp/dhclient.eth0.leases eth0
+

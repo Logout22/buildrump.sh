@@ -189,29 +189,24 @@ void cleanup() {
     }
 }
 
-#if 0
-/*
- * this is the old Bridge/TAP code,
- * see below for the current macvtap version
- */
-int tun_alloc(char *dev)
+#if 1
+int tun_alloc(int *resulting_fd)
 {
-  struct ifreq ifr;
+  *resulting_fd = -1;
+
+  struct ifreq ifr = {
+    .ifr_name = "tun0",
+    /* Flags: IFF_TUN   - TUN device (no Ethernet headers)
+     *        IFF_TAP   - TAP device
+     *
+     *        IFF_NO_PI - Do not provide packet information
+     */
+    .ifr_flags = IFF_TAP | IFF_NO_PI,
+  };
   int fd, err;
 
   if( (fd = open("/dev/net/tun", O_RDWR)) < 0 )
      return -1;
-
-  memset(&ifr, 0, sizeof(ifr));
-
-  /* Flags: IFF_TUN   - TUN device (no Ethernet headers)
-   *        IFF_TAP   - TAP device
-   *
-   *        IFF_NO_PI - Do not provide packet information
-   */
-  ifr.ifr_flags = IFF_TAP | IFF_NO_PI;
-  if( *dev )
-     strncpy(ifr.ifr_name, dev, IFNAMSIZ);
 
   if( (err = ioctl(fd, TUNSETIFF, (void *) &ifr)) < 0 ){
      close(fd);
@@ -224,11 +219,11 @@ int tun_alloc(char *dev)
   }
   CPYMAC(mac_addr, ifr.ifr_hwaddr.sa_data);
 
-  strcpy(dev, ifr.ifr_name);
-  return fd;
+  *resulting_fd = fd;
+  return 0;
 }
-#endif
-
+#else
+// macvtap version:
 int tun_alloc(int *resulting_fd) {
     *resulting_fd = -1;
 
@@ -286,6 +281,7 @@ int tun_alloc(int *resulting_fd) {
     *resulting_fd = fd;
     return 0;
 }
+#endif
 
 static void
 dowakeup(int busfd)

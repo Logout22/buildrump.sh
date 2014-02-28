@@ -1,0 +1,17 @@
+#! /bin/bash
+# Please disabe your DHCP client, like so:
+# dhclient -r -pf /run/dhclient.eth0.pid
+ip addr flush dev eth0
+ip tuntap add tun0 mode tap
+# or choose watever MAC address you like
+ip link set dev tun0 address c2:10:6f:9c:e6:31
+brctl addbr br0
+brctl addif br0 tun0 eth0
+ip link set tun0 up
+ip link set br0 up
+# use the same address here that you had above
+ip link set dev br0 address c2:10:6f:9c:e6:31
+# adapt your IP address here:
+ip addr add 192.168.0.2/24 dev br0
+echo 1 > /proc/sys/net/ipv4/ip_forward
+
