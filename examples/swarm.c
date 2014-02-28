@@ -66,7 +66,7 @@ uint8_t mac_addr[MAC_LEN];
 
 #define EQUALS(s1, s2) (strcmp((s1), (s2)) == 0)
 
-#if 1
+#if 0
 #define ERR(...) { \
     fprintf(stderr, "swarm: "); \
     fprintf(stderr, __VA_ARGS__); \
