@@ -32,6 +32,11 @@ void shutdown_hive() {
     g_hash_table_unref(hive_table[PROTOCOL_TCP]);
 }
 
+#define ETH_HLEN 14
+#define IP_HLEN 20
+#define UDP_HLEN 8
+#define TCP_HLEN 20
+#define ARP_LEN 28
 // offset of source and destination address in Ethernet
 #define ETHEROFF 12
 
@@ -62,14 +67,19 @@ static void send_arp_reply(void *packet,
     CPYIP(curptr, srcip);
 }
 
-static int handle_arp(void *packet, bool outgoing) {
+static int handle_arp(uint8_t *packet,
+        uint8_t *curptr, uint32_t curlen, bool outgoing) {
     // TODO add IPv6 support
-    uint8_t *curptr = OFFSET(packet, 14);
+    if (curlen < ARP_LEN) {
+        return DROP_FRAME;
+    }
     if (MASK(curptr, 0xFFFF, 0) == 1 /*Ethernet*/ &&
             MASK(OFFSET(curptr, 2), 0xFFFF, 0) == 0x0800) {
         curptr += 4;
-        assert(CMASK(curptr, 0xFF, 0) == MAC_LEN &&
-                CMASK(OFFSET(curptr, 1), 0xFF, 0) == IP_LEN);
+        if (CMASK(curptr, 0xFF, 0) != MAC_LEN ||
+                CMASK(OFFSET(curptr, 1), 0xFF, 0) != IP_LEN) {
+            return DROP_FRAME;
+        }
         curptr += 2;
         // choose operation
         int op = MASK(curptr, 0xFFFF, 0);
@@ -85,12 +95,9 @@ static int handle_arp(void *packet, bool outgoing) {
         CPYIP(arp_target_ip, curptr);
         if (op == 1) {
             //handle ARP request
-            if (EQIP(arp_target_ip, &ip_address)) {
-                if (!outgoing) {
-                    send_arp_reply(packet,
-                            arp_source_mac, arp_source_ip);
-                    return FRAME_TO_TAP;
-                }
+            if (EQIP(arp_target_ip, &ip_address) && !outgoing) {
+                send_arp_reply(packet, arp_source_mac, arp_source_ip);
+                return FRAME_TO_TAP;
             } else if (outgoing) {
                 return FRAME_TO_TAP;
             }
@@ -113,36 +120,22 @@ struct ip_meta {
     in_addr_t ipm_receiver;
 };
 
-static struct ip_meta get_ip_metadata(void *packet) {
-    struct ip_meta result;
-    uint8_t *curptr = OFFSET(packet, ETHEROFF);
-    // getting protocol type at byte 12
-    // return if payload is not IP
-    uint16_t frametype = MASK(curptr, 0xFFFF, 0);
-    switch (frametype) {
-        case 0x0800:
-            // regular IP, see below
-            break;
-        case 0x0806:
-            // ARP
-            result.ipm_hlen = -20;
-            return result;
-        default:
-            result.ipm_hlen = -1;
-            return result;
-    }
-    curptr += 2;
-    //TODO missing IPv6 support:
-    if (CMASK(curptr, 0xF0, 4) > 4) {
+static struct ip_meta get_ip_metadata(uint8_t *curptr, uint32_t pktlen) {
+    struct ip_meta result = {};
+    if (pktlen < IP_HLEN) {
         result.ipm_hlen = -2;
         return result;
     }
-    result.ipm_hlen = ETHEROFF + 2;
+    //TODO missing IPv6 support:
+    if (CMASK(curptr, 0xF0, 4) != 4) {
+        result.ipm_hlen = -3;
+        return result;
+    }
     // retrieve IP header size (bit 4..7)
     int ip_header_size = CMASK(curptr, 0x0F, 0);
     // this value is the word count, each word being 32 bits (4 bytes)
     ip_header_size *= 4;
-    result.ipm_hlen += ip_header_size;
+    result.ipm_hlen = ip_header_size;
 
     // skip to protocol field
     curptr += 9;
@@ -162,11 +155,14 @@ struct conn_desc {
     uint16_t cd_flags;
 };
 
-static struct conn_desc get_conn_metadata(void *packet, bool is_tcp) {
+static struct conn_desc get_conn_metadata(
+        uint8_t *curptr, uint32_t pktlen, bool is_tcp) {
     // get the TCP/UDP ports to identify the connection
     // this frame belongs to
-    struct conn_desc res;
-    uint8_t *curptr = (uint8_t*) packet;
+    struct conn_desc res = {};
+    if (pktlen < UDP_HLEN || (is_tcp && pktlen < TCP_HLEN)) {
+        return res;
+    }
     res.cd_source_port = MASK(curptr, 0xFFFF, 0);
     curptr += 2;
     res.cd_dest_port = MASK(curptr, 0xFFFF, 0);
@@ -180,11 +176,10 @@ static struct conn_desc get_conn_metadata(void *packet, bool is_tcp) {
 
 static int lookup_dest_bus(uint16_t dest_port, int table_idx) {
     int pass;
-    gpointer key, value;
     int i_lookup = dest_port & 0xFFFF;
-    gpointer lookup = GINT_TO_POINTER(i_lookup);
+    gpointer value = NULL, lookup = GINT_TO_POINTER(i_lookup);
     if (!g_hash_table_lookup_extended(
-                hive_table[table_idx], lookup, &key, &value)) {
+                hive_table[table_idx], lookup, NULL, &value)) {
         // connection unknown, drop the frame
         pass = DROP_FRAME;
     } else {
@@ -211,61 +206,79 @@ void register_connection(struct bufferevent *bev, int bus_id,
     reply_hive_bind(bev, result);
 }
 
-static int pass_for_port_local(int srcbus_id,
-        uint16_t source_port, uint16_t dest_port,
-        bool outgoing, bool is_tcp) {
+static int pass_for_port_local(uint16_t dest_port, bool is_tcp) {
     int pass = DROP_FRAME;
-    // dest==source surely is not valid:
-    if (source_port != dest_port) {
-        if (!is_tcp) {
-            // check if this connection exists in the UDP table
-            pass = lookup_dest_bus(dest_port, PROTOCOL_UDP);
-        } else {
-            // check if this connection exists in the TCP table
-            pass = lookup_dest_bus(dest_port, PROTOCOL_TCP);
-        }
+    if (!is_tcp) {
+        // check if this connection exists in the UDP table
+        pass = lookup_dest_bus(dest_port, PROTOCOL_UDP);
+    } else {
+        // check if this connection exists in the TCP table
+        pass = lookup_dest_bus(dest_port, PROTOCOL_TCP);
     }
     return pass;
 }
 
-int pass_for_frame(void *frame, int srcbus_id, bool outgoing) {
-    struct ip_meta pktipm = get_ip_metadata(frame);
+int pass_for_frame(void *frame, uint32_t framelen,
+        int srcbus_id, bool outgoing) {
     int pass = DROP_FRAME;
-    //TODO handle more non-IP frames
-    if (pktipm.ipm_hlen == -20) {
-        pass = handle_arp(frame, outgoing);
-    } else if (pktipm.ipm_hlen > 0) {
+    if (framelen < ETH_HLEN) {
+        return pass;
+    }
+
+    // getting protocol type at byte 12
+    struct ip_meta pktipm;
+    uint16_t frametype = MASK(OFFSET(frame, ETHEROFF), 0xFFFF, 0);
+    uint8_t *curptr = OFFSET(frame, ETH_HLEN);
+    framelen -= ETH_HLEN;
+    //TODO handle more types of non-IP frames
+    switch (frametype) {
+        case 0x0800:
+            // regular IP, see below
+            pktipm = get_ip_metadata(curptr, framelen);
+            break;
+        case 0x0806:
+            // ARP
+            pass = handle_arp(frame, curptr, framelen, outgoing);
+        default:
+            return pass;
+    }
+
+    // handle IP
+    if (pktipm.ipm_hlen > 0) {
         bool is_tcp = false;
-        uint8_t *tcp_frame = NULL;
+        curptr += pktipm.ipm_hlen;
+        framelen -= pktipm.ipm_hlen;
         switch (pktipm.ipm_protocol) {
             case 6:
                 is_tcp = true;
                 // fall through:
             case 17:
-                tcp_frame = OFFSET(frame, pktipm.ipm_hlen);
-                struct conn_desc pktcd = get_conn_metadata(
-                        tcp_frame, is_tcp);
-                // TODO missing IPv6 support
-                if ((CMASK(&pktipm.ipm_receiver, 0xFF, 0) == 127 ||
-                    EQIP(&pktipm.ipm_receiver, &ip_address)) &&
-                    /* make sure packets are not re-sent: */
-                    !(outgoing && !EQIP(&pktipm.ipm_sender, &ip_address))) {
-                    // TODO add broadcast/multicast/... addresses
-                    //FIXME dirty hack, replace ASAP
-                    uint8_t custommac[] = {0xB2, 0xA0, 0xEB, 0xE7, 0xD9, 0x3D};
-                    CPYMAC(frame, custommac);
-                    pass = pass_for_port_local(
-                            srcbus_id,
-                            pktcd.cd_source_port,
-                            pktcd.cd_dest_port,
-                            outgoing, is_tcp);
-                } else {
-                    if (outgoing && EQIP(&pktipm.ipm_sender, &ip_address)) {
-                        // this is not for our realm -- send it out
-                        pass = FRAME_TO_TAP;
+                {
+                    struct conn_desc pktcd = get_conn_metadata(
+                            curptr, framelen, is_tcp);
+                    if ( /* multicast: */
+                            CMASK(&pktipm.ipm_receiver, 0xF0, 0) == 0xE0 ||
+                            /* own IP address: */
+                            EQIP(&pktipm.ipm_receiver, &ip_address)) {
+                        /* so the receiver is local */
+
+                        /* make sure packets are not re-sent: */
+                        if (!outgoing ||
+                                EQIP(&pktipm.ipm_sender, &ip_address)) {
+                            /* NOTE: IP stacks need to use this MAC address: */
+                            uint8_t custommac[] =
+                                {0xB2, 0xA0, 0xEB, 0xE7, 0xD9, 0x3D};
+                            CPYMAC(frame, custommac);
+                            pass = pass_for_port_local(
+                                    pktcd.cd_dest_port, is_tcp);
+                        }
                     } else {
-                        // otherwise we are not responsible -- drop it
-                        pass = DROP_FRAME;
+                        /* for remote receivers */
+                        if (outgoing &&
+                                EQIP(&pktipm.ipm_sender, &ip_address)) {
+                            // this is not for our realm -- send it out
+                            pass = FRAME_TO_TAP;
+                        }
                     }
                 }
         }

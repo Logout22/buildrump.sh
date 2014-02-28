@@ -37,10 +37,15 @@ int main(int argc, char *argv[]) {
         die(errno, "socket");
     }
 
-    char const *srv_address = "10.93.49.100";
+    char srv_address[] = "255.255.255.255";
     long req_port = 26420;
     if (argc > 1) {
-        req_port = strtol(argv[1], NULL, 0);
+        strncpy(srv_address, argv[1], strlen(srv_address));
+    } else {
+        strcpy(srv_address, "10.93.48.100");
+    }
+    if (argc > 2) {
+        req_port = strtol(argv[2], NULL, 0);
         if (req_port < 0 || req_port > 65535) {
             die(26, "invalid port number");
         }

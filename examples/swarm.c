@@ -66,7 +66,7 @@ uint8_t mac_addr[MAC_LEN];
 
 #define EQUALS(s1, s2) (strcmp((s1), (s2)) == 0)
 
-#if 0
+#if 1
 #define ERR(...) { \
     fprintf(stderr, "swarm: "); \
     fprintf(stderr, __VA_ARGS__); \
@@ -239,13 +239,13 @@ int tun_alloc(int *resulting_fd) {
     }
 
     struct dirent dir_entry, *result = NULL;
-    int error = 0, fd;
+    int error = 0, fd = -1;
     do {
         if ((error = readdir_r(macvtap_dir, &dir_entry, &result))) {
             break;
         }
         if (result != NULL) {
-            char start_of_name[4];
+            char start_of_name[] = "123";
             strncpy(start_of_name, dir_entry.d_name, 3);
 
             if (EQUALS(start_of_name, "tap")) {
@@ -267,6 +267,9 @@ int tun_alloc(int *resulting_fd) {
     closedir(macvtap_dir);
     if (error) {
         return error;
+    }
+    if (fd < 0) {
+        die(1, "No tap device found.");
     }
 
     // now retrieve MAC address and exit
@@ -590,7 +593,8 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
             struct shmif_pkthdr pkthdr = {};
             readbus(thisbus, &packet, &pkthdr);
             if (packet) {
-                int pass = pass_for_frame(packet, iEvent.wd, true);
+                int pass = pass_for_frame(
+                        packet, pkthdr.sp_len, iEvent.wd, true);
                 if (pass == FRAME_TO_TAP) {
                     write(tapfd, packet, pkthdr.sp_len);
                 } else if (pass == FRAME_TO_ALL) {
@@ -604,6 +608,7 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
                     }
                     writebus(destbus, packet, pkthdr.sp_len);
                 }
+                free(packet);
             }
         } while(packet);
     }
@@ -616,7 +621,7 @@ void handle_tapread(evutil_socket_t sockfd, short events, void *ignore) {
     int8_t readbuf[bufsize];
     ssize_t pktlen;
     while ((pktlen = read(tapfd, readbuf, bufsize)) > 0) {
-        int pass = pass_for_frame(readbuf, INVALID_BUS, false);
+        int pass = pass_for_frame(readbuf, pktlen, INVALID_BUS, false);
         if (pass == FRAME_TO_TAP) {
             write(tapfd, readbuf, pktlen);
         } else if (pass == FRAME_TO_ALL) {
