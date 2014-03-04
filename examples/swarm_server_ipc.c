@@ -40,8 +40,10 @@ size_t sipc_struct_size(int32_t msgid) {
         case SWARM_GETSHM_REPLY:
             return sizeof(struct getshm_rep);
         case HIVE_BIND:
+        case HIVE_UNBIND:
             return sizeof(struct bind_msg);
         case HIVE_BIND_REPLY:
+        case HIVE_UNBIND_REPLY:
             return sizeof(struct bind_rep);
         default:
             return 0;
@@ -171,7 +173,7 @@ int rcv_request_swarm_getshm(struct bufferevent *state) {
     return 0;
 }
 
-int rcv_request_hive_bind(struct bufferevent *state,
+int rcv_request_hive_bind_proc(struct bufferevent *state,
         uint32_t *protocol, uint32_t *port) {
     struct bind_msg to_rcv = {};
     if (!read_struct(state, &to_rcv, sizeof(to_rcv))) {

@@ -7,7 +7,7 @@
 #include <inttypes.h>
 #include <assert.h>
 
-#if 0
+#if 1
 #define ERR(...) { \
     fprintf(stderr, "hive: "); \
     fprintf(stderr, __VA_ARGS__); \
@@ -193,17 +193,30 @@ static int lookup_dest_bus(uint16_t dest_port, int table_idx) {
 void register_connection(struct bufferevent *bev, int bus_id,
         uint32_t protocol, uint32_t resource) {
     int32_t result = -1;
-    if (protocol < 2 && resource <= UINT16_MAX &&
+    gpointer key = GINT_TO_POINTER(resource),
+        value = GINT_TO_POINTER(bus_id);
+    if (protocol < 2 &&
+            resource <= UINT16_MAX &&
             !g_hash_table_lookup_extended(
-                hive_table[protocol], GINT_TO_POINTER((int) resource),
-                NULL, NULL)) {
-        g_hash_table_insert(
-                hive_table[protocol], GINT_TO_POINTER((int) resource),
-                GINT_TO_POINTER(bus_id));
+                hive_table[protocol], key, NULL, NULL)) {
+        // so there is no entry for that resource, create one
+        g_hash_table_insert(hive_table[protocol], key, value);
         result = 0;
     }
     ERR("registered %u/%u for %d\n", protocol, resource, bus_id);
     reply_hive_bind(bev, result);
+}
+
+void remove_connection(int bus_id, uint32_t protocol, uint32_t resource) {
+    gpointer key = GINT_TO_POINTER(resource),
+        value = GINT_TO_POINTER(bus_id);
+    if (protocol < 2 &&
+            resource <= UINT16_MAX &&
+            g_hash_table_lookup(hive_table[protocol], key) == value) {
+        // ok, client is allowed to remove this connection -- proceed
+        g_hash_table_remove(hive_table[protocol], key);
+    }
+    ERR("removed %u/%u for %d\n", protocol, resource, bus_id);
 }
 
 static int pass_for_port_local(uint16_t dest_port, bool is_tcp) {

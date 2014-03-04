@@ -9,7 +9,6 @@
 
 struct bufferevent;
 
-// NOTE: Do not instantiate directly, use allocators below:
 struct bufferevent *initialise_bufferevent(
         struct event_base *ev_ba, int sock,
         bufferevent_data_cb readcb, void *context_object);
@@ -44,7 +43,7 @@ int32_t rcv_message_type_evbuf(struct bufferevent *state);
 
 int rcv_request_swarm_getshm(struct bufferevent *state);
 
-int rcv_request_hive_bind(
+int rcv_request_hive_bind_proc(
         struct bufferevent *state, uint32_t *protocol, uint32_t *port);
 
 size_t sipc_struct_size(int32_t msgid);

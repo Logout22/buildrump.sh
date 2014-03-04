@@ -10,6 +10,8 @@
 #define SWARM_GETSHM_REPLY 3
 #define HIVE_BIND 2
 #define HIVE_BIND_REPLY 4
+#define HIVE_UNBIND 5
+#define HIVE_UNBIND_REPLY 6
 
 #define PROTOCOL_TCP 0
 #define PROTOCOL_UDP 1

@@ -148,6 +148,8 @@ struct tmpbus *allocate_bus() {
     result->tmpbus_position = malloc(sizeof(struct shmif_handle));
     assert(result->tmpbus_position);
     memset(result->tmpbus_position, 0, sizeof(struct shmif_handle));
+    result->tmpbus_hdl = -1;
+    result->tmpbus_wd = -1;
     return result;
 }
 
@@ -709,25 +711,37 @@ void handle_unixread(struct bufferevent *bev, void *data) {
             handle_unixread(bev, data);
         }
     } else {
-        switch(thisbus->tmpbus_lastmsg) {
+        int32_t msg = thisbus->tmpbus_lastmsg;
+        switch(msg) {
             case SWARM_GETSHM:
                 {
                     insert_new_bus(thisbus, bev);
                 }
                 break;
             case HIVE_BIND:
-                if (thisbus->tmpbus_wd) {
-                    uint32_t protocol, resource;
-                    if ((res = rcv_request_hive_bind(
-                                    bev, &protocol, &resource))) {
-                        goto unixread_error;
-                    }
-                    register_connection(
-                            bev, thisbus->tmpbus_wd, protocol, resource);
+            case HIVE_UNBIND:
+                if (thisbus->tmpbus_wd < 0) {
+                    goto hivebind_error;
+                }
+                uint32_t protocol, resource;
+                if ((res = rcv_request_hive_bind_proc(
+                                bev, &protocol, &resource))) {
+                    goto hivebind_error;
+                }
+
+                if (msg == HIVE_UNBIND) {
+                    remove_connection(
+                        thisbus->tmpbus_wd, protocol, resource);
                 } else {
-                    reply_hive_bind(bev, -1);
+                    register_connection(
+                        bev, thisbus->tmpbus_wd, protocol, resource);
                 }
                 break;
+hivebind_error:
+                if (msg == HIVE_BIND) {
+                    reply_hive_bind(bev, -1);
+                }
+                goto unixread_error;
         }
         thisbus->tmpbus_lastmsg = 0;
     }

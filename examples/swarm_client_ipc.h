@@ -12,12 +12,14 @@ void sipc_client_set_socket(int sock);
 int request_swarm_getshm(void);
 
 /**
- * Request a connection.
- * \param protocol the protocol for which to reserve the port
- * \param port the resource (port) to reserve for that protocol
+ * Request or close a connection.
+ * \param protocol the protocol for the port
+ *  (see PROTOCOL_* macros in swarm_ipc.h)
+ * \param port the resource (port) in question
+ * \param unbind \c true for an unbind request, \c false for a bind request
  * \returns 0 on success, a negative error code otherwise
  */
-int request_hive_bind(uint32_t protocol, uint32_t port);
+int request_hive_bind_proc(uint32_t protocol, uint32_t port, bool unbind);
 
 /**
  * Receives the message header and returns the message type.
