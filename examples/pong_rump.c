@@ -122,7 +122,7 @@ int main(int argc, char *argv[]) {
     if (argc > 1) {
         strncpy(srv_address, argv[1], strlen(srv_address));
     } else {
-        strcpy(srv_address, "10.93.48.20");
+        strcpy(srv_address, "10.93.48.2");
     }
     long req_port = 26420;
     if (argc > 1) {
