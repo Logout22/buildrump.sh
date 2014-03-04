@@ -91,7 +91,7 @@ int request_swarm_getshm() {
     return 0;
 }
 
-int request_hive_bind_proc(uint32_t protocol, uint32_t port, bool unbind) {
+int request_hive_bind_proc(uint32_t protocol, uint32_t port, uint8_t unbind) {
     int res;
     int32_t msg = unbind ? HIVE_UNBIND : HIVE_BIND;
     if ((res = send_message_type_sock(msg))) {

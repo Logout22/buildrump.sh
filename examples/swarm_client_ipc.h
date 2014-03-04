@@ -16,10 +16,10 @@ int request_swarm_getshm(void);
  * \param protocol the protocol for the port
  *  (see PROTOCOL_* macros in swarm_ipc.h)
  * \param port the resource (port) in question
- * \param unbind \c true for an unbind request, \c false for a bind request
+ * \param unbind 1 for an unbind request, 0 for a bind request
  * \returns 0 on success, a negative error code otherwise
  */
-int request_hive_bind_proc(uint32_t protocol, uint32_t port, bool unbind);
+int request_hive_bind_proc(uint32_t protocol, uint32_t port, uint8_t unbind);
 
 /**
  * Receives the message header and returns the message type.
