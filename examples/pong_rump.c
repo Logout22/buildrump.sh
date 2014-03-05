@@ -125,8 +125,8 @@ int main(int argc, char *argv[]) {
         strcpy(srv_address, "10.93.48.2");
     }
     long req_port = 26420;
-    if (argc > 1) {
-        req_port = strtol(argv[1], NULL, 0);
+    if (argc > 2) {
+        req_port = strtol(argv[2], NULL, 0);
         if (req_port < 0 || req_port > 65535) {
             die(26, "invalid port number");
         }
