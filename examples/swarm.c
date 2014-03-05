@@ -66,7 +66,7 @@ uint8_t mac_addr[MAC_LEN];
 
 #define EQUALS(s1, s2) (strcmp((s1), (s2)) == 0)
 
-#if 1
+#if 0
 #define ERR(...) { \
     fprintf(stderr, "swarm: "); \
     fprintf(stderr, __VA_ARGS__); \
@@ -352,9 +352,13 @@ shmif_unlockbus(struct shmif_mem *busmem)
 int initbus(struct tmpbus *newbus, struct bufferevent *bev) {
     newbus->tmpbus_bev = bev;
 
+#if 0
     // default to the current directory
     char *res = getcwd(newbus->tmpbus_name, 245);
     assert(res == newbus->tmpbus_name);
+#else
+    strcpy(newbus->tmpbus_name, "/run/swarm");
+#endif
     strcat(newbus->tmpbus_name, "/busXXXXXX");
     newbus->tmpbus_hdl = mkstemp(newbus->tmpbus_name);
     if (newbus->tmpbus_hdl <= 0) {
