@@ -8,7 +8,7 @@ end
 #set logging file trace.log
 break main
 run
-break pong_rump.c:136
+break pong_rump.c:165
 c
 nstep 100000
 c

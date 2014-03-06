@@ -7,7 +7,7 @@
 #include <inttypes.h>
 #include <assert.h>
 
-#if 1
+#if 0
 #define ERR(...) { \
     fprintf(stderr, "hive: "); \
     fprintf(stderr, __VA_ARGS__); \

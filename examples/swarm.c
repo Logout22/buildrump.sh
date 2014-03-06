@@ -702,7 +702,7 @@ void insert_new_bus(struct tmpbus *newbus, struct bufferevent *bev) {
 void handle_unixread(struct bufferevent *bev, void *data) {
     struct tmpbus *thisbus = (struct tmpbus*) data;
 
-    int res;
+    int res = 0;
     if (!thisbus->tmpbus_lastmsg) {
         if ((thisbus->tmpbus_lastmsg = rcv_message_type_evbuf(bev)) <= 0) {
             res = thisbus->tmpbus_lastmsg;
