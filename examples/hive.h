@@ -25,7 +25,7 @@ void init_hive(in_addr_t ip_address, uint8_t *cur_mac_address);
 void shutdown_hive();
 void register_connection(struct bufferevent*, int, uint32_t, uint32_t);
 void remove_connection(int, uint32_t, uint32_t);
-int pass_for_frame(void*,uint32_t,int,bool);
+int pass_for_frame(void const*,uint32_t,int,bool);
 void remove_ports_for_watch(int);
 
 #endif //__HIVE_H__

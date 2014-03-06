@@ -12,7 +12,8 @@ The interesting stuff is in the `examples/` directory.
 On Debian, you will need `bridge-utils`,
 `pkg-config`, `libglib2.0-dev`, and `libevent-dev`.
 Other distributions may vary.
-Swarm also needs the directory `/opt/swarm`
+Swarm also needs the directories `/opt/swarm` and `/run/swarm`
+(with `/run/swarm` ideally on a tmpfs)
 readable and writeable for the current user.
 Before running Swarm, adapt `setup-bridge` to your system and execute it
 (which will probably require root priviledges).
