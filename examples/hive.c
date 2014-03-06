@@ -46,6 +46,7 @@ void shutdown_hive() {
 #define CMASK(P, M, S) ((*((uint8_t*) (P)) & (M)) >> (S))
 #define OFFSET(P, N) (((uint8_t*) (P)) + (N))
 
+#if 0
 static void send_arp_reply(void *packet,
         uint8_t *srcmac, uint8_t *srcip) {
     // TODO add IPv6 support
@@ -112,6 +113,7 @@ static int handle_arp(uint8_t *packet,
     }
     return DROP_FRAME;
 }
+#endif
 
 struct ip_meta {
     int ipm_hlen;
@@ -238,7 +240,12 @@ int pass_for_frame(void *frame, uint32_t framelen,
             break;
         case 0x0806:
             // ARP
-            pass = handle_arp(frame, curptr, framelen, outgoing);
+            //pass = handle_arp(frame, curptr, framelen, outgoing);
+            if (outgoing) {
+                pass = FRAME_TO_TAP;
+            } else {
+                pass = FRAME_TO_ALL;
+            }
         default:
             return pass;
     }
