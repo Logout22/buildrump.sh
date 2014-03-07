@@ -30,10 +30,9 @@
 
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <linux/if.h>
-#include <linux/if_tun.h>
 
-#include <semaphore.h>
+#define NETMAP_WITH_LIBS
+#include <net/netmap_user.h>
 
 #include <event2/event.h>
 #include <event2/event_struct.h>
@@ -100,7 +99,8 @@ struct tmpbus {
     int32_t tmpbus_lastmsg;
 };
 
-static int unix_socket = -1, tapfd = -1, inotify_hdl = -1;
+static int unix_socket = -1, inotify_hdl = -1;
+static struct nm_desc *nm_dev = NULL;
 static struct event *unix_socket_listener_event = NULL,
              *tap_listener_event = NULL,
              *inotify_listener_event = NULL;
@@ -180,8 +180,8 @@ void cleanup() {
     if (inotify_hdl > 0) {
         close(inotify_hdl);
     }
-    if (tapfd > 0) {
-        close(tapfd);
+    if (nm_dev) {
+        nm_close(nm_dev);
     }
     if (ev_base) {
         event_base_free(ev_base);
@@ -191,6 +191,7 @@ void cleanup() {
     }
 }
 
+#if 0
 #if 1
 int tun_alloc(int *resulting_fd)
 {
@@ -283,6 +284,7 @@ int tun_alloc(int *resulting_fd) {
     *resulting_fd = fd;
     return 0;
 }
+#endif
 #endif
 
 static void
@@ -412,7 +414,7 @@ writebus(struct tmpbus *thisbus,
     bool wrap;
     struct shmif_mem *busmem = thisbus->tmpbus_header;
 
-    struct shmif_pkthdr sp = {};
+    struct shmif_pkthdr sp = {0};
 
     assert(pktsize <= ETHERMTU + ETHER_HDR_LEN);
 
@@ -558,6 +560,80 @@ readbus(struct tmpbus *thisbus,
     }
 }
 
+struct swarm_nm_queue_state {
+    uint32_t nm_ring;
+    uint32_t nm_ring_cur;
+    uint32_t nm_ring_space;
+    uint8_t nm_ring_valid;
+    uint32_t nm_packet;
+    uint8_t nm_packet_valid;
+};
+
+static void nm_queue(void *source, uint32_t sourcelen) {
+}
+
+static struct netmap_ring *init_nm_ring(
+        struct swarm_nm_queue_state *current_state) {
+    struct netmap_ring *ring = NETMAP_RXRING(
+            nm_dev->nifp, current_state->nm_ring);
+    current_state->nm_ring_cur = ring->cur;
+    current_state->nm_ring_space = nm_ring_space(ring);
+    return ring;
+}
+
+static ssize_t nm_dequeue(void **target,
+        struct swarm_nm_queue_state *current_state) {
+    if (current_state == NULL || target == NULL) {
+        return -1;
+    }
+
+    struct netmap_ring *rxring;
+    if (!current_state->nm_ring_valid) {
+        // start over
+        current_state->nm_ring = nm_dev->first_rx_ring;
+        rxring = init_nm_ring(current_state);
+        if (current_state->nm_ring_space == 0) {
+            // there is really nothing more to do
+            return 0;
+        }
+        current_state->nm_ring_valid = 1;
+    } else {
+        if (current_state->nm_ring > nm_dev->last_rx_ring) {
+            current_state->nm_ring_valid = 0;
+            return nm_dequeue(target, current_state);
+        }
+        rxring = init_nm_ring(current_state);
+    }
+
+    if (!current_state->nm_packet_valid) {
+        // we are supposed to look for the next ring,
+        // the last one was emptied
+        rxring->head = rxring->cur = current_state->nm_ring_cur;
+        do {
+            current_state->nm_ring++;
+            if (current_state->nm_ring > nm_dev->last_rx_ring) {
+                current_state->nm_ring_valid = 0;
+                return nm_dequeue(target, current_state);
+            }
+            rxring = init_nm_ring(current_state);
+        } while (current_state->nm_ring_space == 0);
+
+        current_state->nm_packet = 0;
+        current_state->nm_packet_valid = 1;
+    } else if (current_state->nm_packet >= current_state->nm_ring_space) {
+        current_state->nm_packet_valid = 0;
+        return nm_dequeue(target, current_state);
+    }
+
+    struct netmap_slot *slot = &(rxring->slot[current_state->nm_ring_cur]);
+
+    *target = NETMAP_BUF(rxring, slot->buf_idx);
+    current_state->nm_packet++;
+    current_state->nm_ring_cur = nm_ring_next(
+            rxring, current_state->nm_ring_cur);
+    return ((ssize_t) slot->len);
+}
+
 void send_frame_to_all(void *frame, size_t flen) {
     GHashTableIter it;
     gpointer key, value;
@@ -571,6 +647,8 @@ void send_frame_to_all(void *frame, size_t flen) {
 }
 
 void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
+    (void) events; (void) ignore;
+
     assert(eventfd == inotify_hdl);
     struct inotify_event iEvent;
 
@@ -592,13 +670,13 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
 
         void *packet = NULL;
         do {
-            struct shmif_pkthdr pkthdr = {};
+            struct shmif_pkthdr pkthdr = {0};
             readbus(thisbus, &packet, &pkthdr);
             if (packet) {
                 int pass = pass_for_frame(
-                        packet, pkthdr.sp_len, iEvent.wd, true);
+                        packet, pkthdr.sp_len, true);
                 if (pass == FRAME_TO_TAP) {
-                    write(tapfd, packet, pkthdr.sp_len);
+                    nm_queue(packet, pkthdr.sp_len);
                 } else if (pass == FRAME_TO_ALL) {
                     send_frame_to_all(packet, pkthdr.sp_len);
                 } else if (pass != DROP_FRAME) {
@@ -617,16 +695,15 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
 }
 
 void handle_tapread(evutil_socket_t sockfd, short events, void *ignore) {
-    assert(sockfd == tapfd);
+    (void) sockfd; (void) events; (void) ignore;
 
-    int const bufsize = 65*1024;
-    int8_t readbuf[bufsize];
+    //int const bufsize = 65*1024;
+    void *readbuf; //[bufsize];
+    struct swarm_nm_queue_state qu_state = {0};
     ssize_t pktlen;
-    while ((pktlen = read(tapfd, readbuf, bufsize)) > 0) {
-        int pass = pass_for_frame(readbuf, pktlen, INVALID_BUS, false);
-        if (pass == FRAME_TO_TAP) {
-            write(tapfd, readbuf, pktlen);
-        } else if (pass == FRAME_TO_ALL) {
+    while ((pktlen = nm_dequeue(&readbuf, &qu_state)) > 0) {
+        int pass = pass_for_frame(readbuf, pktlen, false);
+        if (pass == FRAME_TO_ALL) {
             send_frame_to_all(readbuf, pktlen);
         } else if (pass != DROP_FRAME) {
             struct tmpbus *destbus = (struct tmpbus*)
@@ -758,6 +835,8 @@ unixread_error:
 }
 
 void unix_accept(evutil_socket_t sock, short events, void *ignore) {
+    (void) events; (void) ignore;
+
     int fd = accept(sock, NULL, 0);
 
     if (fd <= 0) {
@@ -797,22 +876,24 @@ int main(int argc, char *argv[]) {
         die(0, "event_base_new");
     }
 
-    ERR("Allocating TAP device\n");
-    int error = tun_alloc(&tapfd);
-    if (tapfd < 0) {
-        tapfd = -1;
-        die(error, "open tap");
-    }
     if (argc < 2) {
+        die(0, "Please supply an interface for Swarm.");
+    }
+    ERR("Allocating Netmap device\n");
+    nm_dev = nm_open(argv[1], NULL, 0, NULL);
+    if (nm_dev == NULL) {
+        die(1, "open netmap (check rights on /dev/netmap)");
+    }
+    if (argc < 3) {
         die(0, "Please supply an IP address for Swarm.");
     }
-    ip_addr_num = inet_addr(argv[1]);
+    ip_addr_num = inet_addr(argv[2]);
     init_hive(ip_addr_num, mac_addr);
     hive_initialised = true;
 
-    evutil_make_socket_nonblocking(tapfd);
+    //evutil_make_socket_nonblocking(tapfd);
     tap_listener_event = event_new(
-            ev_base, tapfd, EV_READ|EV_PERSIST,
+            ev_base, nm_dev->fd, EV_READ|EV_PERSIST,
             handle_tapread, NULL);
     if (tap_listener_event == NULL) {
         die(0, "tap event_new");

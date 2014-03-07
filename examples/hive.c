@@ -123,7 +123,7 @@ struct ip_meta {
 };
 
 static struct ip_meta get_ip_metadata(uint8_t const *curptr, uint32_t pktlen) {
-    struct ip_meta result = {};
+    struct ip_meta result = {0};
     if (pktlen < IP_HLEN) {
         result.ipm_hlen = -2;
         return result;
@@ -161,7 +161,7 @@ static struct conn_desc get_conn_metadata(
         uint8_t const *curptr, uint32_t pktlen, bool is_tcp) {
     // get the TCP/UDP ports to identify the connection
     // this frame belongs to
-    struct conn_desc res = {};
+    struct conn_desc res = {0};
     if (pktlen < UDP_HLEN || (is_tcp && pktlen < TCP_HLEN)) {
         return res;
     }
@@ -233,8 +233,7 @@ static int pass_for_port_local(uint16_t dest_port, bool is_tcp) {
     return pass;
 }
 
-int pass_for_frame(void const *frame, uint32_t framelen,
-        int srcbus_id, bool outgoing) {
+int pass_for_frame(void const *frame, uint32_t framelen, bool outgoing) {
     int pass = DROP_FRAME;
     if (framelen < ETH_HLEN) {
         return pass;
@@ -306,6 +305,8 @@ int pass_for_frame(void const *frame, uint32_t framelen,
 }
 
 gboolean rm_watch(gpointer key, gpointer value, gpointer watch) {
+    (void) key;
+
     if (value == watch) {
         return true;
     } else {

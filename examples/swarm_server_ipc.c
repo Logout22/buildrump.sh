@@ -12,8 +12,9 @@ void __attribute__((__noreturn__))
 die(int, const char*);
 
 void errorcb(struct bufferevent *bev, short error, void *ctx) {
-    bool finished = false;
+    (void) ctx;
 
+    bool finished = false;
     // XXX generalise printf to some in-program error string handler
     if (error & BEV_EVENT_EOF) {
         size_t len = evbuffer_get_length(bufferevent_get_input(bev));
@@ -175,7 +176,7 @@ int rcv_request_swarm_getshm(struct bufferevent *state) {
 
 int rcv_request_hive_bind_proc(struct bufferevent *state,
         uint32_t *protocol, uint32_t *port) {
-    struct bind_msg to_rcv = {};
+    struct bind_msg to_rcv = {0};
     if (!read_struct(state, &to_rcv, sizeof(to_rcv))) {
         return -errno;
     }

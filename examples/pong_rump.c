@@ -94,7 +94,7 @@ int main(int argc, char *argv[]) {
     }
 
     // bus file must be local and stat()-able
-    struct stat statstruct = {};
+    struct stat statstruct = {0};
     if (stat(filename, &statstruct) != 0) {
         free(filename);
         die(errno, "stat");
@@ -133,10 +133,9 @@ int main(int argc, char *argv[]) {
     }
     uint16_t const portnum = (uint16_t) req_port;
     ERR("Connecting to %s:%d\n", srv_address, portnum);
-    struct sockaddr_in sin = {
-        .sin_family = AF_INET,
-        .sin_port = htons(portnum),
-    };
+    struct sockaddr_in sin = {0};
+    sin.sin_family = AF_INET;
+    sin.sin_port = htons(portnum);
     inet_aton(srv_address, &sin.sin_addr);
     int res = rump_sys_connect(
             tcpsock, (struct sockaddr*) &sin, sizeof(sin));
