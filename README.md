@@ -9,16 +9,31 @@ Please use my custom NetBSD source repo, like so:
 
 This is kind of ugly, sorry (see `examples/CRAPL-LICENSE.txt`).
 The interesting stuff is in the `examples/` directory.
+Please create a clone of the netmap repo there:
+
+	cd examples
+	git clone https://code.google.com/p/netmap/
+	cd netmap/LINUX
+	# please adopt the KSRC path to your system:
+	make NODRIVERS=1 KSRC=/usr/src/linux-kernel-source-or-headers
+
+Then you can compile the examples using
+
+	./compile_ping.sh
+
 On Debian, you will need `bridge-utils`,
 `pkg-config`, `libglib2.0-dev`, and `libevent-dev`.
 Other distributions may vary.
+
 Swarm also needs the directories `/opt/swarm` and `/run/swarm`
 (with `/run/swarm` ideally on a tmpfs)
 readable and writeable for the current user.
-Before running Swarm, adapt `setup-bridge` to your system and execute it
-(which will probably require root priviledges).
-You can reverse that setup using `teardown-bridge`, which you will also
-have to adapt before running it.
+It is started like this:
+
+	# only need to load netmap module once:
+	sudo insmod netmap/LINUX/netmap_lin.ko
+	# now run ./swarm <interface> <IP address>
+	./swarm netmap:eth0 10.93.48.100
 
 Tools for building Rump Kernels [![Build Status](https://travis-ci.org/rumpkernel/buildrump.sh.png?branch=master)](https://travis-ci.org/rumpkernel/buildrump.sh)
 ===============================
