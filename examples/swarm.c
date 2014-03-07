@@ -631,7 +631,8 @@ static struct nm_meta_slot nm_get_next_##WHICH##_slot( \
     } else if (current_state->nm_ring > nm_dev->last_rx_ring) { \
         /* just a sanity check
            this should not happen in normal runs */ \
-        ERR("WARNING -- this should not be running (nm_dequeue)\n"); \
+        ERR("WARNING -- this should not be running" \
+                " (nm_get_next_" #WHICH "_slot)\n"); \
         INVALIDATE_RING; \
         return nm_get_next_##WHICH##_slot(current_state); \
     } \
@@ -706,7 +707,7 @@ static void nm_queue(void *source, uint32_t sourcelen,
     memcpy(m_slot.ms_buf, source, sourcelen);
 }
 
-static ssize_t nm_dequeue(void const **target,
+static ssize_t nm_unqueue(void const **target,
         struct swarm_nm_queue_state *current_state) {
     if (current_state == NULL || target == NULL) {
         return -1;
@@ -729,6 +730,8 @@ void nm_flush_sendqueue(struct swarm_nm_queue_state *current_state) {
     // reduce space by amount used up of ring
     current_state->nm_ring_space -= current_state->nm_packet;
     current_state->nm_packet_valid = 0;
+
+	ioctl(nm_dev->fd, NIOCTXSYNC, NULL);
 }
 
 void send_frame_to_all(void const *frame, size_t flen) {
@@ -791,16 +794,22 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
         } while(packet);
         nm_flush_sendqueue(&current_state);
     }
+    //event_add(tap_listener_event, NULL);
 }
 
 void handle_tapread(evutil_socket_t sockfd, short events, void *ignore) {
     (void) sockfd; (void) events; (void) ignore;
 
+    ERR("Rcvd netmap request\n");
     //int const bufsize = 65*1024;
     void const *readbuf; //[bufsize];
     struct swarm_nm_queue_state qu_state = {0};
     ssize_t pktlen;
-    while ((pktlen = nm_dequeue(&readbuf, &qu_state)) > 0) {
+    while ((pktlen = nm_unqueue(&readbuf, &qu_state)) > 0) {
+        uint16_t ethertype = *(((uint16_t*) readbuf) + 6);
+        if (ethertype) {
+            ERR("%04x ", (uint32_t) ethertype);
+        }
         int pass = pass_for_frame(readbuf, pktlen, false);
         if (pass == FRAME_TO_ALL) {
             send_frame_to_all(readbuf, pktlen);
