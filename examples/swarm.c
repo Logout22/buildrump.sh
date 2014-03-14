@@ -74,6 +74,11 @@ uint8_t mac_addr[MAC_LEN];
 #define ERR(...) ((void)NULL)
 #endif
 
+#define URG(...) do { \
+    fprintf(stderr, "swarm: URG: "); \
+    fprintf(stderr, __VA_ARGS__); \
+} while(0)
+
 // contains the variables necessary to maintain a read state:
 struct shmif_handle {
     uint64_t sc_devgen;
@@ -99,10 +104,12 @@ struct tmpbus {
     int32_t tmpbus_lastmsg;
 };
 
-static int unix_socket = -1, inotify_hdl = -1;
+static int unix_socket = -1, inotify_hdl = -1, tap_callcount = 0;
+// seconds, microseconds
+static struct timeval tap_timeout = {2, 0};
 static struct nm_desc *nm_dev = NULL;
 static struct event *unix_socket_listener_event = NULL,
-             *tap_listener_event = NULL,
+             *tap_listener_event = NULL, *tap_timeout_event = NULL,
              *inotify_listener_event = NULL;
 static GHashTable *busses = NULL;
 static struct event_base *ev_base;
@@ -165,6 +172,9 @@ void cleanup() {
     g_hash_table_unref(busses);
     if (unix_socket_listener_event) {
         event_free(unix_socket_listener_event);
+    }
+    if (tap_timeout_event) {
+        event_free(tap_timeout_event);
     }
     if (tap_listener_event) {
         event_free(tap_listener_event);
@@ -549,8 +559,8 @@ readbus(struct tmpbus *thisbus,
     nextpkt = shmif_busread(busmem, *packet,
         nextpkt, spp->sp_len, &wrap);
 
-    ERR("shmif_rcv: read packet of length %d at %d\n",
-        spp->sp_len, nextpkt);
+    /*ERR("shmif_rcv: read packet of length %d at %d\n",
+        spp->sp_len, nextpkt);*/
 
     sc->sc_nextpacket = nextpkt;
     shmif_unlockbus(thisbus->tmpbus_header);
@@ -575,26 +585,22 @@ struct swarm_nm_queue_state {
     current_state->nm_packet = 0; \
     current_state->nm_ring_cur = ring->cur; \
     current_state->nm_ring_space = nm_ring_space(ring); \
-    return ring; \
 } while(0)
 
-static struct netmap_ring *init_nm_rx_ring(
+static struct netmap_ring *get_nm_rx_ring(
         struct swarm_nm_queue_state *current_state) {
-    struct netmap_ring *ring;
-    ring = NETMAP_RXRING(nm_dev->nifp, current_state->nm_ring);
-    INIT_NM_RING;
+    return NETMAP_RXRING(nm_dev->nifp, current_state->nm_ring);
 }
 
-static struct netmap_ring *init_nm_tx_ring(
+static struct netmap_ring *get_nm_tx_ring(
         struct swarm_nm_queue_state *current_state) {
-    struct netmap_ring *ring;
-    ring = NETMAP_TXRING(nm_dev->nifp, current_state->nm_ring);
-    INIT_NM_RING;
+    return NETMAP_TXRING(nm_dev->nifp, current_state->nm_ring);
 }
 
 #define INVALIDATE_PACKET do { \
     ring->head = ring->cur = current_state->nm_ring_cur; \
-    current_state->nm_ring_space = 0; \
+    /* reduce space by amount used up of ring */ \
+    current_state->nm_ring_space -= current_state->nm_packet; \
     current_state->nm_packet_valid = 0; \
 } while(0)
 
@@ -615,6 +621,20 @@ struct nm_meta_slot {
     void *ms_buf;
 };
 
+void nm_flush_txqueue(struct swarm_nm_queue_state *current_state) {
+    struct netmap_ring *ring;
+    ring = NETMAP_TXRING(nm_dev->nifp, current_state->nm_ring);
+    INVALIDATE_PACKET;
+	ioctl(nm_dev->fd, NIOCTXSYNC, NULL);
+}
+
+void nm_flush_rxqueue(struct swarm_nm_queue_state *current_state) {
+    struct netmap_ring *ring;
+    ring = NETMAP_RXRING(nm_dev->nifp, current_state->nm_ring);
+    INVALIDATE_PACKET;
+	ioctl(nm_dev->fd, NIOCRXSYNC, NULL);
+}
+
 #define NM_GET_NEXT_SLOT(WHICH) \
 static struct nm_meta_slot nm_get_next_##WHICH##_slot( \
         struct swarm_nm_queue_state *current_state) { \
@@ -626,7 +646,8 @@ static struct nm_meta_slot nm_get_next_##WHICH##_slot( \
     if (!current_state->nm_ring_valid) { \
         /* start over */ \
         current_state->nm_ring = nm_dev->first_##WHICH##_ring; \
-        ring = init_nm_##WHICH##_ring(current_state); \
+        ring = get_nm_##WHICH##_ring(current_state); \
+        INIT_NM_RING; \
         current_state->nm_ring_valid = 1; \
     } else if (current_state->nm_ring > nm_dev->last_rx_ring) { \
         /* just a sanity check
@@ -643,22 +664,22 @@ static struct nm_meta_slot nm_get_next_##WHICH##_slot( \
         while (current_state->nm_ring_space == 0) { \
             current_state->nm_ring++; \
             if (current_state->nm_ring > nm_dev->last_##WHICH##_ring) { \
-                if (first_##WHICH##_ring_empty()) { \
-                    /* we've been through all rings once,
-                       that should be enough for now */ \
-                    return ((struct nm_meta_slot) {0}); \
-                } else { \
-                    INVALIDATE_RING; \
-                    return nm_get_next_##WHICH##_slot(current_state); \
-                } \
+                /* we've been through all rings once,
+                   that should be enough for now */ \
+                return ((struct nm_meta_slot) {0}); \
             } \
-            ring = init_nm_##WHICH##_ring(current_state); \
+            ring = get_nm_##WHICH##_ring(current_state); \
+            INIT_NM_RING; \
         } \
 \
-        if (ring == NULL) ring = init_nm_##WHICH##_ring(current_state); \
+        /* this is for when you restart after a manual queue flush:
+         * the ring is still valid in that case, just retrieve it again */ \
+        if (ring == NULL) { \
+            ring = get_nm_##WHICH##_ring(current_state); \
+        } \
         current_state->nm_packet_valid = 1; \
     } else { \
-        ring = init_nm_##WHICH##_ring(current_state); \
+        ring = get_nm_##WHICH##_ring(current_state); \
         if (current_state->nm_packet >= current_state->nm_ring_space) { \
             INVALIDATE_PACKET; \
             return nm_get_next_##WHICH##_slot(current_state); \
@@ -672,14 +693,30 @@ static struct nm_meta_slot nm_get_next_##WHICH##_slot( \
        to cause an overflow */ \
     do { \
         m_slot.ms_slot = &(ring->slot[current_state->nm_ring_cur]); \
+        if (m_slot.ms_slot->buf_idx < 2) { \
+            /* this is not a valid value */ \
+            URG("Sleeping\n"); \
+            sleep(2); \
+            if (m_slot.ms_slot->buf_idx < 2) { \
+                URG("Still wrong -- continuing anyway!\n"); \
+                return ((struct nm_meta_slot) {0}); \
+            } \
+        } \
         m_slot.ms_buf = NETMAP_BUF(ring, m_slot.ms_slot->buf_idx); \
+        /*ERR("Retrieved packet slot #%d, abs: %d " \
+                "(size: %d) from ring #%d\n", \
+                current_state->nm_packet, current_state->nm_ring_cur, \
+                current_state->nm_ring_space, current_state->nm_ring);*/ \
         current_state->nm_packet++; \
         if (current_state->nm_packet >= current_state->nm_ring_space) { \
             INVALIDATE_PACKET; \
-            return nm_get_next_##WHICH##_slot(current_state); \
+            if (m_slot.ms_slot->len == 0) { \
+                return nm_get_next_##WHICH##_slot(current_state); \
+            } \
+        } else { \
+            current_state->nm_ring_cur = nm_ring_next( \
+                    ring, current_state->nm_ring_cur); \
         } \
-        current_state->nm_ring_cur = nm_ring_next( \
-                ring, current_state->nm_ring_cur); \
     } while (m_slot.ms_slot->len == 0); \
     return m_slot; \
 }
@@ -723,17 +760,6 @@ static ssize_t nm_unqueue(void const **target,
     return ((ssize_t) m_slot.ms_slot->len);
 }
 
-void nm_flush_sendqueue(struct swarm_nm_queue_state *current_state) {
-    struct netmap_ring *ring;
-    ring = NETMAP_TXRING(nm_dev->nifp, current_state->nm_ring);
-    ring->head = ring->cur = current_state->nm_ring_cur;
-    // reduce space by amount used up of ring
-    current_state->nm_ring_space -= current_state->nm_packet;
-    current_state->nm_packet_valid = 0;
-
-	ioctl(nm_dev->fd, NIOCTXSYNC, NULL);
-}
-
 void send_frame_to_all(void const *frame, size_t flen) {
     GHashTableIter it;
     gpointer key, value;
@@ -769,7 +795,7 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
         }
 
         void *packet = NULL;
-        struct swarm_nm_queue_state current_state;
+        struct swarm_nm_queue_state current_state = {0};
         do {
             struct shmif_pkthdr pkthdr = {0};
             readbus(thisbus, &packet, &pkthdr);
@@ -792,17 +818,25 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
                 free(packet);
             }
         } while(packet);
-        nm_flush_sendqueue(&current_state);
+        nm_flush_txqueue(&current_state);
     }
-    //event_add(tap_listener_event, NULL);
+}
+
+void reenable_tap(evutil_socket_t sockfd, short events, void *ignore) {
+    (void) sockfd; (void) events; (void) ignore;
+    tap_callcount = 0;
+    event_add(tap_listener_event, NULL);
 }
 
 void handle_tapread(evutil_socket_t sockfd, short events, void *ignore) {
     (void) sockfd; (void) events; (void) ignore;
 
-    ERR("Rcvd netmap request\n");
-    //int const bufsize = 65*1024;
-    void const *readbuf; //[bufsize];
+    if (tap_callcount >= 1024) {
+        event_del(tap_listener_event);
+        evtimer_add(tap_timeout_event, &tap_timeout);
+    }
+    tap_callcount++;
+    void const *readbuf;
     struct swarm_nm_queue_state qu_state = {0};
     ssize_t pktlen;
     while ((pktlen = nm_unqueue(&readbuf, &qu_state)) > 0) {
@@ -820,7 +854,6 @@ void handle_tapread(evutil_socket_t sockfd, short events, void *ignore) {
                 ERR("tapread: Invalid bus at ID %d\n", pass);
                 die(226, NULL);
             }
-            ERR("Sending to bus %d\n", pass);
             writebus((struct tmpbus*) destbus,
                     readbuf, pktlen);
         }
@@ -1006,6 +1039,7 @@ int main(int argc, char *argv[]) {
     if (tap_listener_event == NULL) {
         die(0, "tap event_new");
     }
+    tap_timeout_event = evtimer_new(ev_base, reenable_tap, NULL);
     event_add(tap_listener_event, NULL);
 
     ERR("Initialising inotify\n");

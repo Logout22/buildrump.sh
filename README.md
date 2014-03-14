@@ -35,6 +35,9 @@ It is started like this:
 	# now run ./swarm <interface> <IP address>
 	./swarm netmap:eth0 10.93.48.100
 
+Please choose an IP address that differs from your regular one.
+Otherwise necessary ARP lookups will not be sent.
+
 Tools for building Rump Kernels [![Build Status](https://travis-ci.org/rumpkernel/buildrump.sh.png?branch=master)](https://travis-ci.org/rumpkernel/buildrump.sh)
 ===============================
 
