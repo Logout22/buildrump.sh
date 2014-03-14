@@ -106,7 +106,7 @@ struct tmpbus {
 
 static int unix_socket = -1, inotify_hdl = -1, tap_callcount = 0;
 // seconds, microseconds
-static struct timeval tap_timeout = {2, 0};
+static struct timeval tap_timeout = {1, 0};
 static struct nm_desc *nm_dev = NULL;
 static struct event *unix_socket_listener_event = NULL,
              *tap_listener_event = NULL, *tap_timeout_event = NULL,
@@ -559,8 +559,8 @@ readbus(struct tmpbus *thisbus,
     nextpkt = shmif_busread(busmem, *packet,
         nextpkt, spp->sp_len, &wrap);
 
-    /*ERR("shmif_rcv: read packet of length %d at %d\n",
-        spp->sp_len, nextpkt);*/
+    ERR("shmif_rcv: read packet of length %d at %d\n",
+        spp->sp_len, nextpkt);
 
     sc->sc_nextpacket = nextpkt;
     shmif_unlockbus(thisbus->tmpbus_header);
@@ -574,190 +574,43 @@ readbus(struct tmpbus *thisbus,
 
 struct swarm_nm_queue_state {
     uint32_t nm_ring;
-    uint32_t nm_ring_cur;
-    uint32_t nm_ring_space;
     uint8_t nm_ring_valid;
-    uint32_t nm_packet;
-    uint8_t nm_packet_valid;
 };
 
-#define INIT_NM_RING do { \
-    current_state->nm_packet = 0; \
-    current_state->nm_ring_cur = ring->cur; \
-    current_state->nm_ring_space = nm_ring_space(ring); \
-} while(0)
-
-static struct netmap_ring *get_nm_rx_ring(
+void nm_queue(void const *packet, size_t packetlen,
         struct swarm_nm_queue_state *current_state) {
-    return NETMAP_RXRING(nm_dev->nifp, current_state->nm_ring);
-}
+    if (!current_state->nm_ring_valid) {
+        current_state->nm_ring = nm_dev->first_tx_ring;
+        current_state->nm_ring_valid = 1;
+    }
 
-static struct netmap_ring *get_nm_tx_ring(
-        struct swarm_nm_queue_state *current_state) {
-    return NETMAP_TXRING(nm_dev->nifp, current_state->nm_ring);
-}
-
-#define INVALIDATE_PACKET do { \
-    ring->head = ring->cur = current_state->nm_ring_cur; \
-    /* reduce space by amount used up of ring */ \
-    current_state->nm_ring_space -= current_state->nm_packet; \
-    current_state->nm_packet_valid = 0; \
-} while(0)
-
-#define INVALIDATE_RING do { \
-    current_state->nm_ring_valid = 0; \
-} while(0)
-
-bool first_rx_ring_empty() {
-    return nm_ring_empty(NETMAP_RXRING(nm_dev->nifp, nm_dev->first_rx_ring));
-}
-
-bool first_tx_ring_empty() {
-    return nm_ring_empty(NETMAP_TXRING(nm_dev->nifp, nm_dev->first_tx_ring));
-}
-
-struct nm_meta_slot {
-    struct netmap_slot *ms_slot;
-    void *ms_buf;
-};
-
-void nm_flush_txqueue(struct swarm_nm_queue_state *current_state) {
     struct netmap_ring *ring;
     ring = NETMAP_TXRING(nm_dev->nifp, current_state->nm_ring);
-    INVALIDATE_PACKET;
+    while (nm_ring_empty(ring)) {
+        current_state->nm_ring++;
+        if (current_state->nm_ring > nm_dev->last_tx_ring) {
+            current_state->nm_ring = nm_dev->first_tx_ring;
+            if (nm_ring_empty(
+                        NETMAP_TXRING(nm_dev->nifp, current_state->nm_ring))) {
+                die(22, "Ring overflow");
+            }
+        }
+        ring = NETMAP_TXRING(nm_dev->nifp, current_state->nm_ring);
+    }
+
+    if (ring->slot[ring->cur].buf_idx < 2) {
+        die(22, "TX Ring Buffer Index too low");
+    }
+
+    memcpy(
+            NETMAP_BUF(ring, ring->slot[ring->cur].buf_idx),
+            packet,
+            packetlen);
+    ring->head = ring->cur = nm_ring_next(ring, ring->cur);
+}
+
+void nm_flush_txqueue() {
 	ioctl(nm_dev->fd, NIOCTXSYNC, NULL);
-}
-
-void nm_flush_rxqueue(struct swarm_nm_queue_state *current_state) {
-    struct netmap_ring *ring;
-    ring = NETMAP_RXRING(nm_dev->nifp, current_state->nm_ring);
-    INVALIDATE_PACKET;
-	ioctl(nm_dev->fd, NIOCRXSYNC, NULL);
-}
-
-#define NM_GET_NEXT_SLOT(WHICH) \
-static struct nm_meta_slot nm_get_next_##WHICH##_slot( \
-        struct swarm_nm_queue_state *current_state) { \
-    if (current_state == NULL) { \
-        return ((struct nm_meta_slot) {0}); \
-    } \
-\
-    struct netmap_ring *ring = NULL; \
-    if (!current_state->nm_ring_valid) { \
-        /* start over */ \
-        current_state->nm_ring = nm_dev->first_##WHICH##_ring; \
-        ring = get_nm_##WHICH##_ring(current_state); \
-        INIT_NM_RING; \
-        current_state->nm_ring_valid = 1; \
-    } else if (current_state->nm_ring > nm_dev->last_rx_ring) { \
-        /* just a sanity check
-           this should not happen in normal runs */ \
-        ERR("WARNING -- this should not be running" \
-                " (nm_get_next_" #WHICH "_slot)\n"); \
-        INVALIDATE_RING; \
-        return nm_get_next_##WHICH##_slot(current_state); \
-    } \
-\
-    if (!current_state->nm_packet_valid) { \
-        /* we are supposed to look for the next ring,
-           the last one was emptied */ \
-        while (current_state->nm_ring_space == 0) { \
-            current_state->nm_ring++; \
-            if (current_state->nm_ring > nm_dev->last_##WHICH##_ring) { \
-                /* we've been through all rings once,
-                   that should be enough for now */ \
-                return ((struct nm_meta_slot) {0}); \
-            } \
-            ring = get_nm_##WHICH##_ring(current_state); \
-            INIT_NM_RING; \
-        } \
-\
-        /* this is for when you restart after a manual queue flush:
-         * the ring is still valid in that case, just retrieve it again */ \
-        if (ring == NULL) { \
-            ring = get_nm_##WHICH##_ring(current_state); \
-        } \
-        current_state->nm_packet_valid = 1; \
-    } else { \
-        ring = get_nm_##WHICH##_ring(current_state); \
-        if (current_state->nm_packet >= current_state->nm_ring_space) { \
-            INVALIDATE_PACKET; \
-            return nm_get_next_##WHICH##_slot(current_state); \
-        } \
-    } \
-\
-    struct nm_meta_slot m_slot; \
-    /* this could be solved recursively, too,
-       but I fear the ring may be too long and the stack might overflow
-       on the other hand, there are probably not enough rings
-       to cause an overflow */ \
-    do { \
-        m_slot.ms_slot = &(ring->slot[current_state->nm_ring_cur]); \
-        if (m_slot.ms_slot->buf_idx < 2) { \
-            /* this is not a valid value */ \
-            URG("Sleeping\n"); \
-            sleep(2); \
-            if (m_slot.ms_slot->buf_idx < 2) { \
-                URG("Still wrong -- continuing anyway!\n"); \
-                return ((struct nm_meta_slot) {0}); \
-            } \
-        } \
-        m_slot.ms_buf = NETMAP_BUF(ring, m_slot.ms_slot->buf_idx); \
-        /*ERR("Retrieved packet slot #%d, abs: %d " \
-                "(size: %d) from ring #%d\n", \
-                current_state->nm_packet, current_state->nm_ring_cur, \
-                current_state->nm_ring_space, current_state->nm_ring);*/ \
-        current_state->nm_packet++; \
-        if (current_state->nm_packet >= current_state->nm_ring_space) { \
-            INVALIDATE_PACKET; \
-            if (m_slot.ms_slot->len == 0) { \
-                return nm_get_next_##WHICH##_slot(current_state); \
-            } \
-        } else { \
-            current_state->nm_ring_cur = nm_ring_next( \
-                    ring, current_state->nm_ring_cur); \
-        } \
-    } while (m_slot.ms_slot->len == 0); \
-    return m_slot; \
-}
-
-NM_GET_NEXT_SLOT(rx);
-NM_GET_NEXT_SLOT(tx);
-
-static void nm_queue(void *source, uint32_t sourcelen,
-        struct swarm_nm_queue_state *current_state) {
-    if (current_state == NULL ||
-            source == NULL || sourcelen == 0) {
-        return;
-    }
-
-    struct nm_meta_slot m_slot = nm_get_next_tx_slot(current_state);
-    if (m_slot.ms_slot == NULL) {
-        return;
-    }
-
-    if (sourcelen > m_slot.ms_slot->len) {
-        // cannot send -- packet too long
-        return;
-    }
-
-    memcpy(m_slot.ms_buf, source, sourcelen);
-}
-
-static ssize_t nm_unqueue(void const **target,
-        struct swarm_nm_queue_state *current_state) {
-    if (current_state == NULL || target == NULL) {
-        return -1;
-    }
-    *target = NULL;
-
-    struct nm_meta_slot m_slot = nm_get_next_rx_slot(current_state);
-    if (m_slot.ms_slot == NULL) {
-        return 0;
-    }
-
-    *target = m_slot.ms_buf;
-    return ((ssize_t) m_slot.ms_slot->len);
 }
 
 void send_frame_to_all(void const *frame, size_t flen) {
@@ -795,7 +648,8 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
         }
 
         void *packet = NULL;
-        struct swarm_nm_queue_state current_state = {0};
+        // NOTE: change this when multithreading:
+        static struct swarm_nm_queue_state current_state = {0};
         do {
             struct shmif_pkthdr pkthdr = {0};
             readbus(thisbus, &packet, &pkthdr);
@@ -818,7 +672,7 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
                 free(packet);
             }
         } while(packet);
-        nm_flush_txqueue(&current_state);
+        nm_flush_txqueue();
     }
 }
 
@@ -831,32 +685,47 @@ void reenable_tap(evutil_socket_t sockfd, short events, void *ignore) {
 void handle_tapread(evutil_socket_t sockfd, short events, void *ignore) {
     (void) sockfd; (void) events; (void) ignore;
 
+#if 0
     if (tap_callcount >= 1024) {
         event_del(tap_listener_event);
         evtimer_add(tap_timeout_event, &tap_timeout);
     }
     tap_callcount++;
-    void const *readbuf;
-    struct swarm_nm_queue_state qu_state = {0};
-    ssize_t pktlen;
-    while ((pktlen = nm_unqueue(&readbuf, &qu_state)) > 0) {
-        uint16_t ethertype = *(((uint16_t*) readbuf) + 6);
-        if (ethertype) {
-            ERR("%04x ", (uint32_t) ethertype);
-        }
-        int pass = pass_for_frame(readbuf, pktlen, false);
-        if (pass == FRAME_TO_ALL) {
-            send_frame_to_all(readbuf, pktlen);
-        } else if (pass != DROP_FRAME) {
-            struct tmpbus *destbus = (struct tmpbus*)
-                g_hash_table_lookup(busses, GINT_TO_POINTER(pass));
-            if (!destbus) {
-                ERR("tapread: Invalid bus at ID %d\n", pass);
-                die(226, NULL);
+#endif
+
+    uint16_t i;
+    for (i = nm_dev->first_rx_ring; i <= nm_dev->last_rx_ring; i++) {
+        struct netmap_ring *rxring = NETMAP_RXRING(nm_dev->nifp, i);
+        if (nm_ring_empty(rxring))
+            continue;
+
+        uint32_t rx, cur = rxring->cur, ring_space = nm_ring_space(rxring);
+        for (rx = 0; rx < ring_space; rx++) {
+            if (rxring->slot[rxring->cur].buf_idx < 2) {
+                die(22, "RX Ring buffer index too low");
             }
-            writebus((struct tmpbus*) destbus,
-                    readbuf, pktlen);
+            void const *readbuf;
+            uint32_t pktlen;
+            readbuf = NETMAP_BUF(rxring, rxring->slot[rxring->cur].buf_idx);
+            pktlen = rxring->slot[rxring->cur].len;
+
+            int pass = pass_for_frame(readbuf, pktlen, false);
+            if (pass == FRAME_TO_ALL) {
+                send_frame_to_all(readbuf, pktlen);
+            } else if (pass != DROP_FRAME) {
+                struct tmpbus *destbus = (struct tmpbus*)
+                    g_hash_table_lookup(busses, GINT_TO_POINTER(pass));
+                if (!destbus) {
+                    ERR("tapread: Invalid bus at ID %d\n", pass);
+                    die(226, NULL);
+                }
+                writebus((struct tmpbus*) destbus,
+                        readbuf, pktlen);
+            }
+            cur = nm_ring_next(rxring, cur);
         }
+
+        rxring->head = rxring->cur = cur;
     }
 }
 
