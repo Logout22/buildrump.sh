@@ -106,7 +106,7 @@ struct tmpbus {
 
 static int unix_socket = -1, inotify_hdl = -1, tap_callcount = 0;
 // seconds, microseconds
-static struct timeval tap_timeout = {1, 0};
+//static struct timeval tap_timeout = {1, 0};
 static struct nm_desc *nm_dev = NULL;
 static struct event *unix_socket_listener_event = NULL,
              *tap_listener_event = NULL, *tap_timeout_event = NULL,
@@ -114,6 +114,7 @@ static struct event *unix_socket_listener_event = NULL,
 static GHashTable *busses = NULL;
 static struct event_base *ev_base;
 static bool hive_initialised = false;
+static uint16_t nmqueue_ring_id;
 
 void __attribute__((__noreturn__))
 die(int e, const char *msg)
@@ -167,6 +168,18 @@ void deallocate_watch(gpointer arg) {
     inotify_rm_watch(inotify_hdl, watchfd);
 }
 
+void nm_flush_txqueue() {
+    uint16_t i;
+    struct netmap_ring *txring;
+	for (i = nm_dev->first_tx_ring; i <= nm_dev->last_tx_ring; i++) {
+		txring = NETMAP_TXRING(nm_dev->nifp, i);
+		while (nm_tx_pending(txring)) {
+			ioctl(nm_dev->fd, NIOCTXSYNC, NULL);
+			usleep(1); /* wait 1 tick */
+		}
+	}
+}
+
 void cleanup() {
     ERR("Screw you guys, I'm going home!\n");
     g_hash_table_unref(busses);
@@ -191,6 +204,8 @@ void cleanup() {
         close(inotify_hdl);
     }
     if (nm_dev) {
+        /* the final comprehensive flush */
+        nm_flush_txqueue();
         nm_close(nm_dev);
     }
     if (ev_base) {
@@ -572,45 +587,41 @@ readbus(struct tmpbus *thisbus,
     }
 }
 
-struct swarm_nm_queue_state {
-    uint32_t nm_ring;
-    uint8_t nm_ring_valid;
-};
-
-void nm_queue(void const *packet, size_t packetlen,
-        struct swarm_nm_queue_state *current_state) {
-    if (!current_state->nm_ring_valid) {
-        current_state->nm_ring = nm_dev->first_tx_ring;
-        current_state->nm_ring_valid = 1;
-    }
-
+void nm_queue(void const *packet, size_t packetlen) {
     struct netmap_ring *ring;
-    ring = NETMAP_TXRING(nm_dev->nifp, current_state->nm_ring);
+    ring = NETMAP_TXRING(nm_dev->nifp, nmqueue_ring_id);
+
     while (nm_ring_empty(ring)) {
-        current_state->nm_ring++;
-        if (current_state->nm_ring > nm_dev->last_tx_ring) {
-            current_state->nm_ring = nm_dev->first_tx_ring;
+        nmqueue_ring_id++;
+        if (nmqueue_ring_id > nm_dev->last_tx_ring) {
+            nmqueue_ring_id = nm_dev->first_tx_ring;
             if (nm_ring_empty(
-                        NETMAP_TXRING(nm_dev->nifp, current_state->nm_ring))) {
+                        NETMAP_TXRING(nm_dev->nifp, nmqueue_ring_id))) {
                 die(22, "Ring overflow");
             }
         }
-        ring = NETMAP_TXRING(nm_dev->nifp, current_state->nm_ring);
+        ring = NETMAP_TXRING(nm_dev->nifp, nmqueue_ring_id);
     }
 
-    if (ring->slot[ring->cur].buf_idx < 2) {
+    uint32_t cur = ring->cur;
+    struct netmap_slot *slot = &ring->slot[cur];
+    if (slot->buf_idx < 2) {
         die(22, "TX Ring Buffer Index too low");
     }
+    char *buf = NETMAP_BUF(ring, slot->buf_idx);
 
-    memcpy(
-            NETMAP_BUF(ring, ring->slot[ring->cur].buf_idx),
-            packet,
-            packetlen);
-    ring->head = ring->cur = nm_ring_next(ring, ring->cur);
-}
-
-void nm_flush_txqueue() {
-	ioctl(nm_dev->fd, NIOCTXSYNC, NULL);
+    if (packetlen > slot->len) {
+        URG("Packet too long. Truncating %lu->%u\n", packetlen, slot->len);
+        packetlen = slot->len;
+    }
+    slot->flags = 0;
+    memcpy(buf, packet, packetlen);
+    slot->len = packetlen;
+    ERR("Placed packet on ring #%d slot #%d buf #%d,"
+            "head: %d, tail: %d\n",
+            nmqueue_ring_id, ring->cur, ring->slot[ring->cur].buf_idx,
+            ring->head, ring->tail);
+    ring->head = ring->cur = nm_ring_next(ring, cur);
 }
 
 void send_frame_to_all(void const *frame, size_t flen) {
@@ -631,6 +642,21 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
     assert(eventfd == inotify_hdl);
     struct inotify_event iEvent;
 
+    /* we will probably need the netmap device,
+     * so we poll now, maybe in vain,
+     * but on average that should perform better than
+     * repeating the syscall */
+	struct pollfd pfd = { .fd = nm_dev->fd, .events = POLLOUT };
+    int res;
+    do {
+        if ((res = poll(&pfd, 1, 20000)) <= 0 && errno != EAGAIN) {
+            die(errno, "handle_busread: poll() failed");
+        }
+    } while (res <= 0);
+    if (pfd.revents & POLLERR) {
+        die(1, "handle_busread: poll returned an error");
+    }
+
     while (read(inotify_hdl, &iEvent, sizeof(iEvent)) > 0) {
         if (iEvent.mask & IN_CLOSE_WRITE) {
             g_hash_table_remove(busses, GINT_TO_POINTER(iEvent.wd));
@@ -648,8 +674,6 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
         }
 
         void *packet = NULL;
-        // NOTE: change this when multithreading:
-        static struct swarm_nm_queue_state current_state = {0};
         do {
             struct shmif_pkthdr pkthdr = {0};
             readbus(thisbus, &packet, &pkthdr);
@@ -657,7 +681,7 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
                 int pass = pass_for_frame(
                         packet, pkthdr.sp_len, true);
                 if (pass == FRAME_TO_TAP) {
-                    nm_queue(packet, pkthdr.sp_len, &current_state);
+                    nm_queue(packet, pkthdr.sp_len);
                 } else if (pass == FRAME_TO_ALL) {
                     send_frame_to_all(packet, pkthdr.sp_len);
                 } else if (pass != DROP_FRAME) {
@@ -672,7 +696,7 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
                 free(packet);
             }
         } while(packet);
-        nm_flush_txqueue();
+        ioctl(nm_dev->fd, NIOCTXSYNC, NULL);
     }
 }
 
@@ -701,13 +725,12 @@ void handle_tapread(evutil_socket_t sockfd, short events, void *ignore) {
 
         uint32_t rx, cur = rxring->cur, ring_space = nm_ring_space(rxring);
         for (rx = 0; rx < ring_space; rx++) {
-            if (rxring->slot[rxring->cur].buf_idx < 2) {
+            struct netmap_slot *slot = &rxring->slot[cur];
+            if (slot->buf_idx < 2) {
                 die(22, "RX Ring buffer index too low");
             }
-            void const *readbuf;
-            uint32_t pktlen;
-            readbuf = NETMAP_BUF(rxring, rxring->slot[rxring->cur].buf_idx);
-            pktlen = rxring->slot[rxring->cur].len;
+            void const *readbuf = NETMAP_BUF(rxring, slot->buf_idx);
+            uint32_t pktlen = slot->len;
 
             int pass = pass_for_frame(readbuf, pktlen, false);
             if (pass == FRAME_TO_ALL) {
@@ -726,6 +749,8 @@ void handle_tapread(evutil_socket_t sockfd, short events, void *ignore) {
         }
 
         rxring->head = rxring->cur = cur;
+        ERR("Rcv ring #%d: cur: %d, head: %d, tail: %d\n",
+                rx, rxring->cur, rxring->head, rxring->tail);
     }
 }
 
@@ -875,8 +900,12 @@ int main(int argc, char *argv[]) {
     sigaction(SIGINT, &sigact, NULL);
     sigaction(SIGTERM, &sigact, NULL);
 
-    //can eventually be disabled
-    event_enable_debug_mode();
+    if (argc < 2) {
+        die(0, "Please supply an interface for Swarm.");
+    }
+    if (argc < 3) {
+        die(0, "Please supply an IP address for Swarm.");
+    }
 
     busses = g_hash_table_new_full(NULL, NULL,
             deallocate_watch, deallocate_bus);
@@ -886,22 +915,25 @@ int main(int argc, char *argv[]) {
         die(0, "event_base_new");
     }
 
-    if (argc < 2) {
-        die(0, "Please supply an interface for Swarm.");
-    }
     ERR("Allocating Netmap device\n");
     nm_dev = nm_open(argv[1], NULL, 0, NULL);
     if (nm_dev == NULL) {
         die(1, "open netmap (check rights on /dev/netmap)");
     }
-    if (argc < 3) {
-        die(0, "Please supply an IP address for Swarm.");
-    }
+    nmqueue_ring_id = nm_dev->first_tx_ring;
     ip_addr_num = inet_addr(argv[2]);
+#if 0
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    int error;
+    if ((error = ioctl(nm_dev->fd, SIOCGIFHWADDR, &ifr)) < 0) {
+        die(error, "Could not retrieve MAC address");
+    }
+    CPYMAC(mac_addr, ifr.ifr_hwaddr.sa_data);
+#endif
     init_hive(ip_addr_num, mac_addr);
     hive_initialised = true;
 
-    evutil_make_socket_nonblocking(nm_dev->fd);
     tap_listener_event = event_new(
             ev_base, nm_dev->fd, EV_READ|EV_PERSIST,
             handle_tapread, NULL);
