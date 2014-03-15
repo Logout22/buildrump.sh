@@ -116,6 +116,7 @@ static GHashTable *busses = NULL;
 static struct event_base *ev_base;
 static bool hive_initialised = false;
 static uint16_t nmqueue_ring_id;
+static uint8_t busread_packet[NETMAP_SLOT_SIZE];
 
 void __attribute__((__noreturn__))
 die(int e, const char *msg)
@@ -516,7 +517,7 @@ stillvalid_p(struct shmif_mem *busmem, struct shmif_handle *sc)
 
 static void
 readbus(struct tmpbus *thisbus,
-        void **packet, struct shmif_pkthdr *spp)
+        uint8_t *packet, struct shmif_pkthdr *spp)
 {
     uint32_t nextpkt;
     bool wrap;
@@ -536,7 +537,6 @@ readbus(struct tmpbus *thisbus,
          == sc->sc_nextpacket) {
         shmif_unlockbus(thisbus->tmpbus_header);
         // nothing to read
-        *packet = NULL;
         memset(spp, 0, sizeof(struct shmif_pkthdr));
         return;
     }
@@ -570,9 +570,7 @@ readbus(struct tmpbus *thisbus,
      * We need to allocate memory and use shmif_busread because
      * packets might wrap around, so they must be copied anyway.
      */
-    *packet = malloc(spp->sp_len);
-    assert(*packet);
-    nextpkt = shmif_busread(busmem, *packet,
+    nextpkt = shmif_busread(busmem, packet,
         nextpkt, spp->sp_len, &wrap);
 
     ERR("shmif_rcv: read packet of length %d at %d\n",
@@ -675,17 +673,16 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
             continue;
         }
 
-        void *packet = NULL;
+        struct shmif_pkthdr pkthdr = {0};
         do {
-            struct shmif_pkthdr pkthdr = {0};
-            readbus(thisbus, &packet, &pkthdr);
-            if (packet) {
+            readbus(thisbus, busread_packet, &pkthdr);
+            if (pkthdr.sp_len > 0) {
                 int pass = pass_for_frame(
-                        packet, pkthdr.sp_len, true);
+                        busread_packet, pkthdr.sp_len, true);
                 if (pass == FRAME_TO_TAP || pass == FRAME_TO_ALL_AND_TAP) {
-                    nm_queue(packet, pkthdr.sp_len);
+                    nm_queue(busread_packet, pkthdr.sp_len);
                 } else if (pass == FRAME_TO_ALL || pass == FRAME_TO_ALL_AND_TAP) {
-                    send_frame_to_all(packet, pkthdr.sp_len);
+                    send_frame_to_all(busread_packet, pkthdr.sp_len);
                 } else if (pass != DROP_FRAME) {
                     struct tmpbus *destbus = (struct tmpbus*)
                         g_hash_table_lookup(busses, GINT_TO_POINTER(pass));
@@ -693,11 +690,10 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
                         ERR("busread: Invalid bus at ID %d\n", pass);
                         die(225, NULL);
                     }
-                    writebus(destbus, packet, pkthdr.sp_len);
+                    writebus(destbus, busread_packet, pkthdr.sp_len);
                 }
-                free(packet);
             }
-        } while(packet);
+        } while(pkthdr.sp_len > 0);
 
         // finally, sync the queue
         ioctl(nm_dev->fd, NIOCTXSYNC, NULL);
