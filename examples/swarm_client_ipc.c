@@ -108,7 +108,8 @@ int request_hive_bind_proc(uint32_t protocol, uint32_t port, uint8_t unbind) {
     return 0;
 }
 
-int rcv_reply_swarm_getshm(in_addr_t *ip_addr, char **filename) {
+int rcv_reply_swarm_getshm(
+        in_addr_t *ip_addr, uint8_t *mac_addr, char **filename) {
     struct getshm_rep to_rcv = {};
     if (!read_struct(&to_rcv, sizeof(to_rcv))) {
         return -errno;
@@ -128,6 +129,7 @@ int rcv_reply_swarm_getshm(in_addr_t *ip_addr, char **filename) {
     }
 
     *ip_addr = to_rcv.gr_ip_address;
+    memcpy(mac_addr, to_rcv.gr_mac_address, MAC_ADDR_LEN);
     *filename = rcvd_filename;
     return 0;
 }

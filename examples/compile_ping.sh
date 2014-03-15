@@ -1,4 +1,4 @@
-if [ "$1" = "d" ]; then OPT="-O0"; else OPT="-O3"; fi
+if [ "$1" = "d" ]; then OPT="-O0"; else OPT="-O2"; fi
 RD=../rump
 SHMIFD=../src/sys/rump/net/lib/libshmif
 cc -g -Wall -Wextra -Wshadow $OPT ping.c -o ping -I$RD/include -L$RD/lib \

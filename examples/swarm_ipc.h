@@ -19,6 +19,8 @@
 #define HIVE_SUCCESS 0
 #define HIVE_FAILURE -1
 
+#define MAC_ADDR_LEN 6
+
 struct unxsock_msg {
     uint32_t um_ver;
     int32_t um_msgid;
@@ -30,6 +32,7 @@ struct getshm_msg {
 
 struct getshm_rep {
     in_addr_t gr_ip_address;
+    uint8_t gr_mac_address[MAC_ADDR_LEN];
     uint32_t gr_filename_len;
     /*
      * The protocol requires the sender to supply

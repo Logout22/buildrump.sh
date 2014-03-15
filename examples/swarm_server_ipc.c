@@ -126,7 +126,7 @@ static int send_message_type_evbuf(struct bufferevent *state, int32_t msgid) {
 }
 
 int reply_swarm_getshm(struct bufferevent *state,
-        in_addr_t ip_addr, char *filename) {
+        in_addr_t ip_addr, uint8_t *macaddr, char *filename) {
     int res;
     if ((res = send_message_type_evbuf(state, SWARM_GETSHM_REPLY))) {
         return res;
@@ -142,6 +142,7 @@ int reply_swarm_getshm(struct bufferevent *state,
         .gr_ip_address = ip_addr,
         .gr_filename_len = (uint32_t) retr_len
     };
+    memcpy(to_send.gr_mac_address, macaddr, MAC_ADDR_LEN);
 
     if (!write_struct(state, &to_send, sizeof(to_send))) {
         return -errno;

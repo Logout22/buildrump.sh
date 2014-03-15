@@ -65,7 +65,7 @@ uint8_t mac_addr[MAC_LEN];
 
 #define EQUALS(s1, s2) (strcmp((s1), (s2)) == 0)
 
-#if 1
+#if 0
 #define ERR(...) do { \
     fprintf(stderr, "swarm: "); \
     fprintf(stderr, __VA_ARGS__); \
@@ -86,6 +86,7 @@ struct shmif_handle {
 };
 
 #define TMPBUS_NAME_LEN 256
+#define NETMAP_SLOT_SIZE 2048
 
 /* NOTE: Do NOT instantiate struct tmpbus directly.
  * Use something like:
@@ -610,17 +611,18 @@ void nm_queue(void const *packet, size_t packetlen) {
     }
     char *buf = NETMAP_BUF(ring, slot->buf_idx);
 
-    if (packetlen > slot->len) {
-        URG("Packet too long. Truncating %lu->%u\n", packetlen, slot->len);
-        packetlen = slot->len;
+    if (packetlen > NETMAP_SLOT_SIZE) {
+        URG("Packet too long. Truncating %lu->%u\n",
+                packetlen, NETMAP_SLOT_SIZE);
+        packetlen = NETMAP_SLOT_SIZE;
     }
     slot->flags = 0;
     memcpy(buf, packet, packetlen);
     slot->len = packetlen;
-    ERR("Placed packet on ring #%d slot #%d buf #%d,"
+    /*ERR("Placed packet on ring #%d slot #%d buf #%d,"
             "head: %d, tail: %d\n",
             nmqueue_ring_id, ring->cur, ring->slot[ring->cur].buf_idx,
-            ring->head, ring->tail);
+            ring->head, ring->tail);*/
     ring->head = ring->cur = nm_ring_next(ring, cur);
 }
 
@@ -680,9 +682,9 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
             if (packet) {
                 int pass = pass_for_frame(
                         packet, pkthdr.sp_len, true);
-                if (pass == FRAME_TO_TAP) {
+                if (pass == FRAME_TO_TAP || pass == FRAME_TO_ALL_AND_TAP) {
                     nm_queue(packet, pkthdr.sp_len);
-                } else if (pass == FRAME_TO_ALL) {
+                } else if (pass == FRAME_TO_ALL || pass == FRAME_TO_ALL_AND_TAP) {
                     send_frame_to_all(packet, pkthdr.sp_len);
                 } else if (pass != DROP_FRAME) {
                     struct tmpbus *destbus = (struct tmpbus*)
@@ -696,6 +698,8 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
                 free(packet);
             }
         } while(packet);
+
+        // finally, sync the queue
         ioctl(nm_dev->fd, NIOCTXSYNC, NULL);
     }
 }
@@ -749,8 +753,8 @@ void handle_tapread(evutil_socket_t sockfd, short events, void *ignore) {
         }
 
         rxring->head = rxring->cur = cur;
-        ERR("Rcv ring #%d: cur: %d, head: %d, tail: %d\n",
-                rx, rxring->cur, rxring->head, rxring->tail);
+        /*ERR("Rcv ring #%d: cur: %d, head: %d, tail: %d\n",
+                rx, rxring->cur, rxring->head, rxring->tail);*/
     }
 }
 
@@ -801,7 +805,7 @@ void insert_new_bus(struct tmpbus *newbus, struct bufferevent *bev) {
     // now answer the client with the bus file name
     int res;
     if ((res = reply_swarm_getshm(
-                bev, ip_addr_num, newbus->tmpbus_name))) {
+                bev, ip_addr_num, mac_addr, newbus->tmpbus_name))) {
         deallocate_bus(newbus);
         ERR("Error replying the client side: %d\n", -res);
         return;
@@ -915,22 +919,29 @@ int main(int argc, char *argv[]) {
         die(0, "event_base_new");
     }
 
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, argv[1], IFNAMSIZ);
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    int error;
+    if ((error = ioctl(sock, SIOCGIFHWADDR, &ifr)) < 0) {
+        die(error, "Could not retrieve MAC address");
+    }
+    CPYMAC(mac_addr, ifr.ifr_hwaddr.sa_data);
+    size_t nm_iface_name_len = 8 + strlen(argv[1]);
+    char *nm_iface_name = malloc(nm_iface_name_len);
+    strcpy(nm_iface_name, "netmap:");
+    strcat(nm_iface_name, argv[1]);
+
     ERR("Allocating Netmap device\n");
-    nm_dev = nm_open(argv[1], NULL, 0, NULL);
+    nm_dev = nm_open(nm_iface_name, NULL, 0, NULL);
+    free(nm_iface_name);
     if (nm_dev == NULL) {
         die(1, "open netmap (check rights on /dev/netmap)");
     }
     nmqueue_ring_id = nm_dev->first_tx_ring;
     ip_addr_num = inet_addr(argv[2]);
-#if 0
-    struct ifreq ifr;
-    memset(&ifr, 0, sizeof(ifr));
-    int error;
-    if ((error = ioctl(nm_dev->fd, SIOCGIFHWADDR, &ifr)) < 0) {
-        die(error, "Could not retrieve MAC address");
-    }
-    CPYMAC(mac_addr, ifr.ifr_hwaddr.sa_data);
-#endif
+
     init_hive(ip_addr_num, mac_addr);
     hive_initialised = true;
 

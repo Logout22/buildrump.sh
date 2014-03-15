@@ -6,6 +6,7 @@
 #include <arpa/inet.h>
 
 // Pass constants
+#define FRAME_TO_ALL_AND_TAP -5
 #define INVALID_BUS -4
 #define DROP_FRAME -3
 #define FRAME_TO_TAP -2

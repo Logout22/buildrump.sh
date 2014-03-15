@@ -22,7 +22,8 @@ void deallocate_bufferevent(struct bufferevent *oldstate);
  * \returns 0 on success, a negative error code otherwise
  */
 int reply_swarm_getshm(
-        struct bufferevent *state, in_addr_t ip_addr, char *filename);
+        struct bufferevent *state,
+        in_addr_t ip_addr, uint8_t *mac_addr, char *filename);
 
 /**
  * Send back information on the requested connection.
