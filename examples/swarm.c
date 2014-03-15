@@ -443,7 +443,10 @@ writebus(struct tmpbus *thisbus,
 
     struct shmif_pkthdr sp = {0};
 
-    assert(pktsize <= ETHERMTU + ETHER_HDR_LEN);
+    if (pktsize > ETHERMTU + ETHER_HDR_LEN) {
+        URG("writebus: dropping packet (%u bytes)\n", pktsize);
+        return;
+    }
 
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -565,7 +568,11 @@ readbus(struct tmpbus *thisbus,
 
     nextpkt = shmif_busread(busmem, spp,
         nextpkt, sizeof(struct shmif_pkthdr), &wrap);
-    assert(spp->sp_len <= ETHERMTU + ETHER_HDR_LEN);
+    if (spp->sp_len > ETHERMTU + ETHER_HDR_LEN) {
+        URG("readbus: dropping packet (%u bytes)\n", spp->sp_len);
+        memset(spp, 0, sizeof(struct shmif_pkthdr));
+        return;
+    }
     /*
      * We need to allocate memory and use shmif_busread because
      * packets might wrap around, so they must be copied anyway.
@@ -900,15 +907,15 @@ int main(int argc, char *argv[]) {
     sigaction(SIGINT, &sigact, NULL);
     sigaction(SIGTERM, &sigact, NULL);
 
+    busses = g_hash_table_new_full(NULL, NULL,
+            deallocate_watch, deallocate_bus);
+
     if (argc < 2) {
         die(0, "Please supply an interface for Swarm.");
     }
     if (argc < 3) {
         die(0, "Please supply an IP address for Swarm.");
     }
-
-    busses = g_hash_table_new_full(NULL, NULL,
-            deallocate_watch, deallocate_bus);
 
     ev_base = event_base_new();
     if (ev_base == NULL) {
