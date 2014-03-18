@@ -318,7 +318,9 @@ static void
 dowakeup(int busfd)
 {
     uint32_t ver = SHMIF_VERSION;
-    pwrite(busfd, &ver, sizeof(ver), IFMEM_WAKEUP);
+    if (pwrite(busfd, &ver, sizeof(ver), IFMEM_WAKEUP) < sizeof(ver)) {
+        die(1, "pwrite failed");
+    }
 }
 
 #define LOCK_UNLOCKED	0
@@ -738,6 +740,9 @@ void handle_tapread(evutil_socket_t sockfd, short events, void *ignore) {
             }
             void const *readbuf = NETMAP_BUF(rxring, slot->buf_idx);
             uint32_t pktlen = slot->len;
+            if (pktlen > NETMAP_SLOT_SIZE) {
+                die(1, "netmap buffer overflow");
+            }
 
             int pass = pass_for_frame(readbuf, pktlen, false);
             if (pass == FRAME_TO_ALL) {
