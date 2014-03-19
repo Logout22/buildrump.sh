@@ -28,10 +28,14 @@ Other distributions may vary.
 Swarm also needs the directories `/opt/swarm` and `/run/swarm`
 (with `/run/swarm` ideally on a tmpfs)
 readable and writeable for the current user.
-It is started like this:
+Normally, you can use the prepare-swarm.sh script to set this up.
+As that script has to be run with root rights, please check if
+it fits your system before executing it!
 
-	# only need to load netmap module once:
-	sudo insmod netmap/LINUX/netmap_lin.ko
+Swarm is started like this:
+
+    cd examples
+	sudo ./prepare-swarm
 	# now run ./swarm <interface> <IP address>
 	./swarm eth0 10.93.48.100
 
