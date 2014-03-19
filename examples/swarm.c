@@ -318,7 +318,8 @@ static void
 dowakeup(int busfd)
 {
     uint32_t ver = SHMIF_VERSION;
-    if (pwrite(busfd, &ver, sizeof(ver), IFMEM_WAKEUP) < sizeof(ver)) {
+    ssize_t res = pwrite(busfd, &ver, sizeof(ver), IFMEM_WAKEUP);
+    if (res < (ssize_t) sizeof(ver)) {
         die(1, "pwrite failed");
     }
 }
