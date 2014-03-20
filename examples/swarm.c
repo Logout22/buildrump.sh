@@ -107,6 +107,7 @@ static struct event *unix_socket_listener_event = NULL,
 static GHashTable *busses = NULL;
 static struct event_base *ev_base;
 static bool hive_initialised = false;
+uint8_t busread_packet[ETHER_HDR_LEN + ETHERMTU];
 
 void __attribute__((__noreturn__))
 die(int e, const char *msg)
@@ -289,7 +290,10 @@ static void
 dowakeup(int busfd)
 {
     uint32_t ver = SHMIF_VERSION;
-    pwrite(busfd, &ver, sizeof(ver), IFMEM_WAKEUP);
+    ssize_t res = pwrite(busfd, &ver, sizeof(ver), IFMEM_WAKEUP);
+    if (res < (ssize_t) sizeof(ver)) {
+        die(1, "pwrite failed");
+    }
 }
 
 #define LOCK_UNLOCKED	0
@@ -414,7 +418,10 @@ writebus(struct tmpbus *thisbus,
 
     struct shmif_pkthdr sp = {};
 
-    assert(pktsize <= ETHERMTU + ETHER_HDR_LEN);
+    if (pktsize > ETHERMTU + ETHER_HDR_LEN) {
+        ERR("writebus: dropping packet (%u bytes)\n", pktsize);
+        return;
+    }
 
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -486,7 +493,7 @@ stillvalid_p(struct shmif_mem *busmem, struct shmif_handle *sc)
 
 static void
 readbus(struct tmpbus *thisbus,
-        void **packet, struct shmif_pkthdr *spp)
+        uint8_t *packet, struct shmif_pkthdr *spp)
 {
     uint32_t nextpkt;
     bool wrap;
@@ -506,7 +513,6 @@ readbus(struct tmpbus *thisbus,
          == sc->sc_nextpacket) {
         shmif_unlockbus(thisbus->tmpbus_header);
         // nothing to read
-        *packet = NULL;
         memset(spp, 0, sizeof(struct shmif_pkthdr));
         return;
     }
@@ -535,14 +541,16 @@ readbus(struct tmpbus *thisbus,
 
     nextpkt = shmif_busread(busmem, spp,
         nextpkt, sizeof(struct shmif_pkthdr), &wrap);
-    assert(spp->sp_len <= ETHERMTU + ETHER_HDR_LEN);
+    if (spp->sp_len > ETHERMTU + ETHER_HDR_LEN) {
+        ERR("readbus: dropping packet (%u bytes)\n", spp->sp_len);
+        memset(spp, 0, sizeof(struct shmif_pkthdr));
+        return;
+    }
     /*
-     * We need to allocate memory and use shmif_busread because
+     * We need to use shmif_busread because
      * packets might wrap around, so they must be copied anyway.
      */
-    *packet = malloc(spp->sp_len);
-    assert(*packet);
-    nextpkt = shmif_busread(busmem, *packet,
+    nextpkt = shmif_busread(busmem, packet,
         nextpkt, spp->sp_len, &wrap);
 
     ERR("shmif_rcv: read packet of length %d at %d\n",
@@ -590,29 +598,30 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
             continue;
         }
 
-        void *packet = NULL;
+        struct shmif_pkthdr pkthdr = {};
         do {
-            struct shmif_pkthdr pkthdr = {};
-            readbus(thisbus, &packet, &pkthdr);
-            if (packet) {
+            readbus(thisbus, busread_packet, &pkthdr);
+            if (pkthdr.sp_len > 0) {
                 int pass = pass_for_frame(
-                        packet, pkthdr.sp_len, iEvent.wd, true);
-                if (pass == FRAME_TO_TAP) {
-                    write(tapfd, packet, pkthdr.sp_len);
-                } else if (pass == FRAME_TO_ALL) {
-                    send_frame_to_all(packet, pkthdr.sp_len);
-                } else if (pass != DROP_FRAME) {
+                        busread_packet, pkthdr.sp_len, true);
+                if (pass < 0) {
+                    if (pass == FRAME_TO_TAP || pass == FRAME_TO_ALL_AND_TAP) {
+                        write(tapfd, busread_packet, pkthdr.sp_len);
+                    }
+                    if (pass == FRAME_TO_ALL || pass == FRAME_TO_ALL_AND_TAP) {
+                        send_frame_to_all(busread_packet, pkthdr.sp_len);
+                    }
+                } else {
                     struct tmpbus *destbus = (struct tmpbus*)
                         g_hash_table_lookup(busses, GINT_TO_POINTER(pass));
                     if (!destbus) {
                         ERR("busread: Invalid bus at ID %d\n", pass);
                         die(225, NULL);
                     }
-                    writebus(destbus, packet, pkthdr.sp_len);
+                    writebus(destbus, busread_packet, pkthdr.sp_len);
                 }
-                free(packet);
             }
-        } while(packet);
+        } while(pkthdr.sp_len > 0);
     }
 }
 
@@ -623,12 +632,15 @@ void handle_tapread(evutil_socket_t sockfd, short events, void *ignore) {
     int8_t readbuf[bufsize];
     ssize_t pktlen;
     while ((pktlen = read(tapfd, readbuf, bufsize)) > 0) {
-        int pass = pass_for_frame(readbuf, pktlen, INVALID_BUS, false);
-        if (pass == FRAME_TO_TAP) {
-            write(tapfd, readbuf, pktlen);
-        } else if (pass == FRAME_TO_ALL) {
-            send_frame_to_all(readbuf, pktlen);
-        } else if (pass != DROP_FRAME) {
+        int pass = pass_for_frame(readbuf, pktlen, false);
+        if (pass < 0) {
+            if (pass == FRAME_TO_TAP || pass == FRAME_TO_ALL_AND_TAP) {
+                write(tapfd, readbuf, pktlen);
+            }
+            if (pass == FRAME_TO_ALL || pass == FRAME_TO_ALL_AND_TAP) {
+                send_frame_to_all(readbuf, pktlen);
+            }
+        } else {
             struct tmpbus *destbus = (struct tmpbus*)
                 g_hash_table_lookup(busses, GINT_TO_POINTER(pass));
             if (!destbus) {

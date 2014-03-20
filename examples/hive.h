@@ -6,6 +6,7 @@
 #include <arpa/inet.h>
 
 // Pass constants
+#define FRAME_TO_ALL_AND_TAP -5
 #define INVALID_BUS -4
 #define DROP_FRAME -3
 #define FRAME_TO_TAP -2
@@ -25,7 +26,7 @@ void init_hive(in_addr_t ip_address, uint8_t *cur_mac_address);
 void shutdown_hive();
 void register_connection(struct bufferevent*, int, uint32_t, uint32_t);
 void remove_connection(int, uint32_t, uint32_t);
-int pass_for_frame(void const*,uint32_t,int,bool);
+int pass_for_frame(void const*,uint32_t,bool);
 void remove_ports_for_watch(int);
 
 #endif //__HIVE_H__

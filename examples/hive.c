@@ -123,7 +123,7 @@ struct ip_meta {
 };
 
 static struct ip_meta get_ip_metadata(uint8_t const *curptr, uint32_t pktlen) {
-    struct ip_meta result = {};
+    struct ip_meta result = {0};
     if (pktlen < IP_HLEN) {
         result.ipm_hlen = -2;
         return result;
@@ -161,7 +161,7 @@ static struct conn_desc get_conn_metadata(
         uint8_t const *curptr, uint32_t pktlen, bool is_tcp) {
     // get the TCP/UDP ports to identify the connection
     // this frame belongs to
-    struct conn_desc res = {};
+    struct conn_desc res = {0};
     if (pktlen < UDP_HLEN || (is_tcp && pktlen < TCP_HLEN)) {
         return res;
     }
@@ -170,7 +170,7 @@ static struct conn_desc get_conn_metadata(
     res.cd_dest_port = MASK(curptr, 0xFFFF, 0);
     if (is_tcp) {
         // skip seq/ack number
-        curptr += 8;
+        curptr += 10;
         res.cd_flags = MASK(curptr, 0x0FFF, 0);
     }
     return res;
@@ -180,12 +180,12 @@ static int lookup_dest_bus(uint16_t dest_port, int table_idx) {
     int pass;
     int i_lookup = dest_port & 0xFFFF;
     gpointer value = NULL, lookup = GINT_TO_POINTER(i_lookup);
-    if (!g_hash_table_lookup_extended(
+    if (g_hash_table_lookup_extended(
                 hive_table[table_idx], lookup, NULL, &value)) {
+        pass = GPOINTER_TO_INT(value);
+    } else {
         // connection unknown, drop the frame
         pass = DROP_FRAME;
-    } else {
-        pass = GPOINTER_TO_INT(value);
     }
 
     ERR("%u goes to %d\n", dest_port, pass);
@@ -221,20 +221,7 @@ void remove_connection(int bus_id, uint32_t protocol, uint32_t resource) {
     ERR("removed %u/%u for %d\n", protocol, resource, bus_id);
 }
 
-static int pass_for_port_local(uint16_t dest_port, bool is_tcp) {
-    int pass = DROP_FRAME;
-    if (!is_tcp) {
-        // check if this connection exists in the UDP table
-        pass = lookup_dest_bus(dest_port, PROTOCOL_UDP);
-    } else {
-        // check if this connection exists in the TCP table
-        pass = lookup_dest_bus(dest_port, PROTOCOL_TCP);
-    }
-    return pass;
-}
-
-int pass_for_frame(void const *frame, uint32_t framelen,
-        int srcbus_id, bool outgoing) {
+int pass_for_frame(void const *frame, uint32_t framelen, bool outgoing) {
     int pass = DROP_FRAME;
     if (framelen < ETH_HLEN) {
         return pass;
@@ -276,20 +263,24 @@ int pass_for_frame(void const *frame, uint32_t framelen,
                 {
                     struct conn_desc pktcd = get_conn_metadata(
                             curptr, framelen, is_tcp);
-                    if ( /* multicast: */
-                            CMASK(&pktipm.ipm_receiver, 0xF0, 0) == 0xE0 ||
-                            /* own IP address: */
-                            EQIP(&pktipm.ipm_receiver, &ip_address)) {
+                    /* multicast: */
+                    if (CMASK(&pktipm.ipm_receiver, 0xF0, 0) == 0xE0) {
+                        if (outgoing) {
+                            pass = FRAME_TO_ALL_AND_TAP;
+                        } else {
+                            pass = FRAME_TO_ALL;
+                        }
+                    }
+                    /* own IP address: */
+                    if (EQIP(&pktipm.ipm_receiver, &ip_address)) {
                         /* so the receiver is local */
 
                         /* make sure packets are not re-sent: */
                         if (!outgoing ||
                                 EQIP(&pktipm.ipm_sender, &ip_address)) {
-                            /* NOTE: IP stacks need to use this MAC address:
-                            uint8_t custommac[] =
-                                {0xB2, 0xA0, 0xEB, 0xE7, 0xD9, 0x3D}; */
-                            pass = pass_for_port_local(
-                                    pktcd.cd_dest_port, is_tcp);
+                            pass = lookup_dest_bus(
+                                    pktcd.cd_dest_port,
+                                    is_tcp ? PROTOCOL_TCP : PROTOCOL_UDP);
                         }
                     } else {
                         /* for remote receivers */
@@ -306,6 +297,8 @@ int pass_for_frame(void const *frame, uint32_t framelen,
 }
 
 gboolean rm_watch(gpointer key, gpointer value, gpointer watch) {
+    (void) key;
+
     if (value == watch) {
         return true;
     } else {
