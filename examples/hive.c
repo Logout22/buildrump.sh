@@ -176,16 +176,22 @@ static struct conn_desc get_conn_metadata(
     return res;
 }
 
-static int lookup_dest_bus(uint16_t dest_port, int table_idx) {
+static int lookup_bus(uint16_t dest_port, bool is_tcp) {
     int pass;
     int i_lookup = dest_port & 0xFFFF;
+    uint32_t table_idx = is_tcp ? PROTOCOL_TCP : PROTOCOL_UDP;
     gpointer value = NULL, lookup = GINT_TO_POINTER(i_lookup);
     if (g_hash_table_lookup_extended(
                 hive_table[table_idx], lookup, NULL, &value)) {
         pass = GPOINTER_TO_INT(value);
     } else {
-        // connection unknown, drop the frame
-        pass = DROP_FRAME;
+        if (is_tcp) {
+            // connection unknown, drop the frame
+            pass = DROP_FRAME;
+        } else {
+            // try everyone
+            pass = INVALID_BUS;
+        }
     }
 
     ERR("%u goes to %d\n", dest_port, pass);
@@ -198,7 +204,7 @@ void register_connection(struct bufferevent *bev, int bus_id,
     gpointer key = GINT_TO_POINTER(resource),
         value = GINT_TO_POINTER(bus_id);
     if (protocol < 2 &&
-            resource <= UINT16_MAX &&
+            resource > 0 && resource <= UINT16_MAX &&
             !g_hash_table_lookup_extended(
                 hive_table[protocol], key, NULL, NULL)) {
         // so there is no entry for that resource, create one
@@ -213,7 +219,7 @@ void remove_connection(int bus_id, uint32_t protocol, uint32_t resource) {
     gpointer key = GINT_TO_POINTER(resource),
         value = GINT_TO_POINTER(bus_id);
     if (protocol < 2 &&
-            resource <= UINT16_MAX &&
+            resource > 0 && resource <= UINT16_MAX &&
             g_hash_table_lookup(hive_table[protocol], key) == value) {
         // ok, client is allowed to remove this connection -- proceed
         g_hash_table_remove(hive_table[protocol], key);
@@ -263,31 +269,49 @@ int pass_for_frame(void const *frame, uint32_t framelen, bool outgoing) {
                 {
                     struct conn_desc pktcd = get_conn_metadata(
                             curptr, framelen, is_tcp);
-                    /* multicast: */
                     if (CMASK(&pktipm.ipm_receiver, 0xF0, 0) == 0xE0) {
+                        /* multicast: */
                         if (outgoing) {
                             pass = FRAME_TO_ALL_AND_TAP;
                         } else {
                             pass = FRAME_TO_ALL;
                         }
-                    }
-                    /* own IP address: */
-                    if (EQIP(&pktipm.ipm_receiver, &ip_address)) {
-                        /* so the receiver is local */
+                    } else if (EQIP(&pktipm.ipm_receiver, &ip_address)) {
+                        /* own IP address, so the receiver is local */
 
-                        /* make sure packets are not re-sent: */
+                        /* Make sure packets are not re-sent:
+                         * Either they come from outside,
+                         * so we are the receiver, or they are loopback.
+                         * Packets cannot be sent from the system
+                         * to the outside world
+                         * with another than the global system IP address. */
                         if (!outgoing ||
                                 EQIP(&pktipm.ipm_sender, &ip_address)) {
-                            pass = lookup_dest_bus(
+                            pass = lookup_bus(
                                     pktcd.cd_dest_port,
-                                    is_tcp ? PROTOCOL_TCP : PROTOCOL_UDP);
+                                    is_tcp);
+                            if (pass == INVALID_BUS) {
+                                // broadcast UDP:
+                                pass = FRAME_TO_ALL;
+                            }
                         }
                     } else {
                         /* for remote receivers */
                         if (outgoing &&
                                 EQIP(&pktipm.ipm_sender, &ip_address)) {
                             // this is not for our realm -- send it out
-                            pass = FRAME_TO_TAP;
+                            int srcbus = lookup_bus(
+                                    pktcd.cd_source_port,
+                                    is_tcp);
+                            if (srcbus >= 0) {
+                                // source bus is valid, send frame
+                                pass = FRAME_TO_TAP;
+                            } else {
+                                if (srcbus == INVALID_BUS) {
+                                    //broadcast UDP:
+                                    pass = FRAME_TO_ALL_AND_TAP;
+                                }
+                            }
                         }
                     }
                 }
