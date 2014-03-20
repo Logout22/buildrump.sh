@@ -689,11 +689,14 @@ void handle_busread(evutil_socket_t eventfd, short events, void *ignore) {
             if (pkthdr.sp_len > 0) {
                 int pass = pass_for_frame(
                         busread_packet, pkthdr.sp_len, true);
-                if (pass == FRAME_TO_TAP || pass == FRAME_TO_ALL_AND_TAP) {
-                    nm_queue(busread_packet, pkthdr.sp_len);
-                } else if (pass == FRAME_TO_ALL || pass == FRAME_TO_ALL_AND_TAP) {
-                    send_frame_to_all(busread_packet, pkthdr.sp_len);
-                } else if (pass != DROP_FRAME) {
+                if (pass < 0) {
+                    if (pass == FRAME_TO_TAP || pass == FRAME_TO_ALL_AND_TAP) {
+                        nm_queue(busread_packet, pkthdr.sp_len);
+                    }
+                    if (pass == FRAME_TO_ALL || pass == FRAME_TO_ALL_AND_TAP) {
+                        send_frame_to_all(busread_packet, pkthdr.sp_len);
+                    }
+                } else {
                     struct tmpbus *destbus = (struct tmpbus*)
                         g_hash_table_lookup(busses, GINT_TO_POINTER(pass));
                     if (!destbus) {
@@ -746,9 +749,14 @@ void handle_tapread(evutil_socket_t sockfd, short events, void *ignore) {
             }
 
             int pass = pass_for_frame(readbuf, pktlen, false);
-            if (pass == FRAME_TO_ALL) {
-                send_frame_to_all(readbuf, pktlen);
-            } else if (pass != DROP_FRAME) {
+            if (pass < 0) {
+                if (pass == FRAME_TO_TAP || pass == FRAME_TO_ALL_AND_TAP) {
+                    nm_queue(readbuf, pktlen);
+                }
+                if (pass == FRAME_TO_ALL || pass == FRAME_TO_ALL_AND_TAP) {
+                    send_frame_to_all(readbuf, pktlen);
+                }
+            } else {
                 struct tmpbus *destbus = (struct tmpbus*)
                     g_hash_table_lookup(busses, GINT_TO_POINTER(pass));
                 if (!destbus) {
