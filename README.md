@@ -21,7 +21,7 @@ Then you can compile the examples using
 
 	./compile_ping.sh
 
-On Debian, you will need `bridge-utils`,
+On Debian, you will need `ethtool`, `bridge-utils`,
 `pkg-config`, `libglib2.0-dev`, and `libevent-dev`.
 Other distributions may vary.
 
