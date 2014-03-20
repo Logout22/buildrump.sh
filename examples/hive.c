@@ -185,13 +185,8 @@ static int lookup_bus(uint16_t dest_port, bool is_tcp) {
                 hive_table[table_idx], lookup, NULL, &value)) {
         pass = GPOINTER_TO_INT(value);
     } else {
-        if (is_tcp) {
-            // connection unknown, drop the frame
-            pass = DROP_FRAME;
-        } else {
-            // try everyone
-            pass = INVALID_BUS;
-        }
+        // connection unknown, drop the frame
+        pass = DROP_FRAME;
     }
 
     ERR("%u goes to %d\n", dest_port, pass);
@@ -290,10 +285,6 @@ int pass_for_frame(void const *frame, uint32_t framelen, bool outgoing) {
                             pass = lookup_bus(
                                     pktcd.cd_dest_port,
                                     is_tcp);
-                            if (pass == INVALID_BUS) {
-                                // broadcast UDP:
-                                pass = FRAME_TO_ALL;
-                            }
                         }
                     } else {
                         /* for remote receivers */
@@ -306,11 +297,6 @@ int pass_for_frame(void const *frame, uint32_t framelen, bool outgoing) {
                             if (srcbus >= 0) {
                                 // source bus is valid, send frame
                                 pass = FRAME_TO_TAP;
-                            } else {
-                                if (srcbus == INVALID_BUS) {
-                                    //broadcast UDP:
-                                    pass = FRAME_TO_ALL_AND_TAP;
-                                }
                             }
                         }
                     }
